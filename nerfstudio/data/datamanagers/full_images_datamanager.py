@@ -103,7 +103,18 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
     """
     A datamanager that outputs full images and cameras instead of raybundles. This makes the
     datamanager more lightweight since we don't have to do generate rays. Useful for full-image
-    training e.g. rasterization pipelines
+    training e.g. rasterization pipelines.
+
+    Features:
+    - Supports multiple image caching strategies (CPU, GPU, disk)
+    - Optional image tiling for memory-efficient training of large images
+    - Configurable camera sampling strategies (random, farthest point sampling)
+    - Parallel image loading with configurable thread workers
+
+    Tiling:
+    When tile_size_max > 0, large images are automatically split into balanced tiles
+    to reduce GPU memory usage. Each tile gets its own adjusted camera parameters
+    while preserving the mathematical correctness of the rendering process.
     """
 
     config: FullImageDatamanagerConfig
@@ -222,7 +233,31 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
     def _calculate_balanced_tile_sizes(
         self, width: int, height: int, tile_size_max: int, tile_alignment: int
     ) -> Tuple[List[int], List[int]]:
-        """Calculate balanced tile sizes that are similar in dimensions."""
+        """Calculate balanced tile sizes that are similar in dimensions.
+
+        This method splits an image into tiles where each tile is approximately tile_size_max
+        pixels in width/height, with dimensions aligned to tile_alignment for optimal GPU
+        performance. The algorithm ensures all tiles are similar in size by distributing
+        any remainder pixels across tiles.
+
+        Args:
+            width: Original image width in pixels
+            height: Original image height in pixels
+            tile_size_max: Maximum tile dimension in pixels. If <= 0, returns original dimensions
+            tile_alignment: Tile dimensions must be multiples of this value for GPU efficiency
+
+        Returns:
+            Tuple of (tile_widths, tile_heights) where:
+            - tile_widths: List of tile widths that sum to original width
+            - tile_heights: List of tile heights that sum to original height
+
+        Raises:
+            ValueError: If image is too large for the given tile_size_max and alignment constraints
+
+        Example:
+            >>> dm._calculate_balanced_tile_sizes(128, 80, 64, 16)
+            ([64, 64], [48, 32])  # 2x2 tiles with 16px alignment
+        """
         import math
 
         # Disable tiling if tile_size_max <= 0
@@ -272,7 +307,29 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
     def _tile_undistorted_image(
         self, image: torch.Tensor, tile_widths: List[int], tile_heights: List[int]
     ) -> List[torch.Tensor]:
-        """Split image into tiles using calculated dimensions."""
+        """Split image into tiles using calculated dimensions.
+
+        Takes a single image tensor and splits it into multiple tile tensors based on
+        the provided tile dimensions. Tiles are extracted in row-major order (left-to-right,
+        top-to-bottom).
+
+        Args:
+            image: Input image tensor of shape (H, W, C)
+            tile_widths: List of tile widths that sum to image width
+            tile_heights: List of tile heights that sum to image height
+
+        Returns:
+            List of tile tensors, each of shape (tile_height, tile_width, C).
+            Tiles are ordered row-major: [tile_0_0, tile_0_1, ..., tile_1_0, tile_1_1, ...]
+
+        Example:
+            >>> image = torch.rand(80, 128, 3)  # 80x128 RGB image
+            >>> tiles = dm._tile_undistorted_image(image, [64, 64], [40, 40])
+            >>> len(tiles)  # 2x2 = 4 tiles
+            4
+            >>> tiles[0].shape  # First tile (top-left)
+            torch.Size([40, 64, 3])
+        """
         tiles = []
         y_offset = 0
 
@@ -290,7 +347,35 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
     def _adjust_camera_intrinsics_for_tile(
         self, cameras: Cameras, tile_offset_x: int, tile_offset_y: int, tile_width: int, tile_height: int
     ) -> Cameras:
-        """Adjust camera intrinsics for a specific tile."""
+        """Adjust camera intrinsics for a specific tile.
+
+        When an image is tiled, each tile represents a cropped view of the original image.
+        The camera intrinsics (principal point cx/cy and image dimensions) must be adjusted
+        to reflect this cropping. Focal lengths (fx/fy) remain unchanged as they are
+        properties of the lens/sensor.
+
+        Args:
+            cameras: Original camera parameters
+            tile_offset_x: Horizontal offset of tile from image origin (pixels)
+            tile_offset_y: Vertical offset of tile from image origin (pixels)
+            tile_width: Width of the tile (pixels)
+            tile_height: Height of the tile (pixels)
+
+        Returns:
+            New Cameras object with adjusted intrinsics:
+            - cx adjusted by subtracting tile_offset_x
+            - cy adjusted by subtracting tile_offset_y
+            - width/height set to tile dimensions
+            - fx/fy preserved (lens properties don't change)
+            - camera_to_worlds preserved (extrinsic parameters don't change)
+
+        Example:
+            >>> # Original camera: cx=57, cy=43, 128x80 image
+            >>> # Tile at offset (64, 40) with size 64x40
+            >>> adjusted = dm._adjust_camera_intrinsics_for_tile(cameras, 64, 40, 64, 40)
+            >>> adjusted.cx  # 57 - 64 = -7 (principal point now relative to tile)
+            tensor([-7.])
+        """
         # Create a copy of the cameras
         adjusted_cameras = cameras.clone()
 
@@ -307,7 +392,35 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
     def _replicate_cameras_for_tiles(
         self, cameras: Cameras, tile_widths: List[int], tile_heights: List[int]
     ) -> List[Cameras]:
-        """Replicate and adjust cameras for each tile."""
+        """Replicate and adjust cameras for each tile.
+
+        Creates a separate camera for each tile with properly adjusted intrinsics.
+        Each tile camera represents the view parameters for rendering that specific
+        tile region. The cameras are generated in row-major order to match the
+        tile ordering from _tile_undistorted_image.
+
+        Args:
+            cameras: Original camera parameters (single camera)
+            tile_widths: List of tile widths that sum to image width
+            tile_heights: List of tile heights that sum to image height
+
+        Returns:
+            List of Camera objects, one per tile, with adjusted intrinsics.
+            Order matches tile ordering: [tile_0_0, tile_0_1, ..., tile_1_0, tile_1_1, ...]
+            Each camera has:
+            - Adjusted cx/cy for tile offset
+            - Tile-specific width/height
+            - Preserved fx/fy (focal lengths)
+            - Preserved camera_to_worlds (pose)
+
+        Example:
+            >>> # 2x2 tiling of 128x80 image
+            >>> tile_cameras = dm._replicate_cameras_for_tiles(cameras, [64, 64], [40, 40])
+            >>> len(tile_cameras)  # 4 cameras for 4 tiles
+            4
+            >>> tile_cameras[0].width, tile_cameras[0].height  # First tile dimensions
+            (tensor([64]), tensor([40]))
+        """
         tile_cameras = []
         y_offset = 0
 
@@ -402,7 +515,36 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
     def _apply_tiling_to_images(
         self, images: List[Dict[str, torch.Tensor]], split: Literal["train", "eval"]
     ) -> List[Dict[str, torch.Tensor]]:
-        """Apply tiling to undistorted images and update cameras accordingly."""
+        """Apply tiling to undistorted images and update cameras accordingly.
+
+        This is the main tiling orchestration method that processes a list of images
+        and applies tiling to reduce GPU memory usage. For each image larger than
+        tile_size_max, it splits the image into balanced tiles and creates corresponding
+        camera parameters for each tile.
+
+        Args:
+            images: List of image dictionaries, each containing 'image' tensor and metadata
+            split: Dataset split being processed ('train' or 'eval')
+
+        Returns:
+            List of tiled image dictionaries. Each original image may produce multiple
+            tiles, so the output list is typically longer than the input list.
+            Each dictionary contains:
+            - 'image': Tiled image tensor
+            - Other metadata from original image
+
+        Side Effects:
+            - Updates self.train_cameras or self.eval_cameras with tiled camera parameters
+            - Logs tiling statistics (number of tiles created, memory multiplier)
+            - Warns if tile multiplier is very high (>16x)
+
+        Example:
+            >>> # Process 3 images, some may be tiled
+            >>> original_images = [{'image': img1}, {'image': img2}, {'image': img3}]
+            >>> tiled_images = dm._apply_tiling_to_images(original_images, 'train')
+            >>> len(tiled_images)  # May be > 3 if images were tiled
+            12  # e.g., if each image was split into 4 tiles
+        """
         tiled_images = []
         tiled_cameras_list = []
         tile_mapping = []  # Track which original image each tile came from
