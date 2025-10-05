@@ -477,12 +477,23 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             CONSOLE.log(f"Tiling {split}: {original_count} → {tiled_count} images ({memory_multiplier:.1f}x memory)")
             if memory_multiplier > 4.0:
                 CONSOLE.log(f"[yellow]Warning: Tiling increases memory usage by {memory_multiplier:.1f}x[/yellow]")
+                CONSOLE.log("[yellow]Consider reducing tile_size_max or using cache_images='cpu'[/yellow]")
 
         # Store tile mapping for debugging
         if split == "train":
             self.tile_to_original_mapping = tile_mapping
 
         return tiled_images
+
+    def _get_tiled_images_lazy(self, split: Literal["train", "eval"]) -> List[Dict[str, torch.Tensor]]:
+        """Get tiled images with lazy computation."""
+        if split not in self._tiled_cache:
+            if split in self._original_images:
+                CONSOLE.log(f"Computing tiles on-demand for {split}")
+                self._tiled_cache[split] = self._apply_tiling_to_images(self._original_images[split], split)
+            else:
+                raise ValueError(f"No original images stored for lazy tiling in split: {split}")
+        return self._tiled_cache[split]
 
     def create_train_dataset(self) -> TDataset:
         """Sets up the data loaders for training"""
