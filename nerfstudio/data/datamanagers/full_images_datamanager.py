@@ -473,11 +473,13 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         # Log tiling statistics
         tiled_count = len(tiled_images)
         if tiled_count > original_count:
-            memory_multiplier = tiled_count / original_count
-            CONSOLE.log(f"Tiling {split}: {original_count} → {tiled_count} images ({memory_multiplier:.1f}x memory)")
-            if memory_multiplier > 4.0:
-                CONSOLE.log(f"[yellow]Warning: Tiling increases memory usage by {memory_multiplier:.1f}x[/yellow]")
-                CONSOLE.log("[yellow]Consider reducing tile_size_max or using cache_images='cpu'[/yellow]")
+            tile_multiplier = tiled_count / original_count
+            CONSOLE.log(f"Tiling {split}: {original_count} → {tiled_count} images ({tile_multiplier:.1f}x tiles)")
+            CONSOLE.log("[green]Tiling reduces GPU memory usage by processing smaller tiles individually[/green]")
+            if tile_multiplier > 16.0:
+                CONSOLE.log(
+                    f"[yellow]Many tiles ({tile_multiplier:.0f}x) - consider larger tile_size_max for efficiency[/yellow]"
+                )
 
         # Store tile mapping for debugging
         if split == "train":

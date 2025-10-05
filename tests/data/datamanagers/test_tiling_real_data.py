@@ -101,9 +101,7 @@ def test_tiling_scenarios():
             assert all(h <= tile_max for h in heights), f"{desc}: Height constraint violated"
 
             tile_count = len(widths) * len(heights)
-            memory_multiplier = tile_count
-
-            print(f"✅ {desc}: {len(widths)}x{len(heights)} = {tile_count} tiles ({memory_multiplier:.1f}x memory)")
+            print(f"✅ {desc}: {len(widths)}x{len(heights)} = {tile_count} tiles (reduces GPU memory)")
 
         except ValueError as e:
             print(f"⚠️  {desc}: {e}")
@@ -138,11 +136,8 @@ def test_memory_impact():
             widths, heights = dm._calculate_balanced_tile_sizes(width, height, tile_size, 16)
             tile_count = len(widths) * len(heights)
 
-            # Calculate memory usage
-            memory_multiplier = tile_count  # Simplified - actual overhead varies
-
             print(
-                f"  tile_size_max={tile_size:4d}: {len(widths)}x{len(heights)} = {tile_count:2d} tiles ({memory_multiplier:.1f}x memory)"
+                f"  tile_size_max={tile_size:4d}: {len(widths)}x{len(heights)} = {tile_count:2d} tiles (reduces GPU memory)"
             )
 
         except ValueError as e:
