@@ -534,8 +534,8 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         else:
             assert_never(cache_images_device)
 
-        # NEW: Apply tiling if enabled
-        if self.config.tile_size_max > 0:
+        # NEW: Apply tiling if enabled (only for training images)
+        if self.config.tile_size_max > 0 and split == "train":
             undistorted_images = self._apply_tiling_to_images(undistorted_images, split)
 
         return undistorted_images
@@ -631,10 +631,23 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         # Update cameras for this split
         if len(tiled_cameras_list) > 0:
-            # Stack all tile cameras into a single Cameras object
-            tiled_cameras = tiled_cameras_list[0]
-            for cam in tiled_cameras_list[1:]:
-                tiled_cameras = tiled_cameras.cat([tiled_cameras, cam])
+            # Create a new Cameras object from all tile cameras
+            tiled_cameras = Cameras(
+                fx=torch.cat([cam.fx for cam in tiled_cameras_list]),
+                fy=torch.cat([cam.fy for cam in tiled_cameras_list]),
+                cx=torch.cat([cam.cx for cam in tiled_cameras_list]),
+                cy=torch.cat([cam.cy for cam in tiled_cameras_list]),
+                width=torch.cat([cam.width for cam in tiled_cameras_list]),
+                height=torch.cat([cam.height for cam in tiled_cameras_list]),
+                camera_to_worlds=torch.cat([cam.camera_to_worlds for cam in tiled_cameras_list]),
+                camera_type=torch.cat([cam.camera_type for cam in tiled_cameras_list]),
+                distortion_params=torch.cat([cam.distortion_params for cam in tiled_cameras_list])
+                if tiled_cameras_list[0].distortion_params is not None
+                else None,
+                times=torch.cat([cam.times for cam in tiled_cameras_list])
+                if tiled_cameras_list[0].times is not None
+                else None,
+            )
 
             if split == "train":
                 self.train_cameras = tiled_cameras
