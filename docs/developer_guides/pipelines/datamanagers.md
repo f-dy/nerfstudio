@@ -115,6 +115,34 @@ To train splatfacto with a large dataset that's unable to fit in memory, please 
 ns-train splatfacto --data {PROCESSED_DATA_DIR} --pipeline.datamanager.cache-images disk
 ```
 
+## Image Tiling for Memory Efficiency
+
+The FullImageDatamanager supports automatic image tiling to reduce GPU memory usage when training with large images. When enabled, large images are split into smaller tiles that are processed individually, significantly reducing memory requirements.
+
+To enable tiling, set `tile_size_max` to the maximum tile dimension in pixels:
+```bash
+ns-train splatfacto --data {PROCESSED_DATA_DIR} --pipeline.datamanager.tile-size-max 512
+```
+
+Key tiling parameters:
+- `tile_size_max`: Maximum tile size in pixels (default: 0, disabled). Images larger than this are split into tiles.
+- `tile_alignment`: Tile dimensions are rounded to multiples of this value for GPU efficiency (default: 16).
+
+Example with both memory optimizations:
+```bash
+ns-train splatfacto --data {PROCESSED_DATA_DIR} \
+  --pipeline.datamanager.cache-images cpu \
+  --pipeline.datamanager.tile-size-max 512 \
+  --pipeline.datamanager.tile-alignment 16
+```
+
+Tiling is particularly beneficial for:
+- High-resolution datasets (4K+ images)
+- Limited GPU memory scenarios
+- Training stability with large images
+
+The tiling process maintains mathematical correctness by properly adjusting camera intrinsics for each tile while preserving focal lengths and camera poses.
+
 Checkout these flowcharts for more customization on large datasets!
 
 ```{image} imgs/DatamanagerGuide-LargeNeRF-light.png
@@ -141,7 +169,7 @@ Checkout these flowcharts for more customization on large datasets!
 :width: 600
 ```
 
-## Migrating Your DataManager to the new DataManager 
+## Migrating Your DataManager to the new DataManager
 Many methods subclass a DataManager and add extra data to it. If you would like your custom datamanager to also support new parallel features, you can migrate any custom dataloading logic to the new `custom_ray_processor()` API. This function takes in a full training batch (either image or ray bundle) and allows the user to modify or add to it. Let's take a look at an example for the LERF method, which was built on Nerfstudio's VanillaDataManager. This API provides an interface to attach new information to the RayBundle (for ray based methods), Cameras object (for splatting based methods), or ground truth dictionary. It runs in a background process if disk caching is enabled, otherwise it runs in the main process.
 
 Naively transfering code to `custom_ray_processor` may still OOM on very large datasets if initialization code requires computing something over the whole dataset. To fully take advantage of parallelization make sure your subclassed datamanager computes new information inside the `custom_ray_processor`, or caches a subset of the whole dataset. This can also still be slow if pre-computation requires GPU-heavy steps on the same GPU used for training.
@@ -151,7 +179,7 @@ Naively transfering code to `custom_ray_processor` may still OOM on very large d
 ```python
 class LERFDataManager(VanillaDataManager):
     """Subclass VanillaDataManager to add extra data processing
-    
+
     Args:
         config: the DataManagerConfig used to instantiate class
     """
@@ -197,7 +225,7 @@ class LERFDataManager(VanillaDataManager):
         return ray_bundle, batch
 ```
 
-To migrate this custom datamanager to the new datamanager, we'll subclass the new ParallelDataManager and shift the data customization process from `next_train()` to `custom_ray_processor()`. 
+To migrate this custom datamanager to the new datamanager, we'll subclass the new ParallelDataManager and shift the data customization process from `next_train()` to `custom_ray_processor()`.
 The function `custom_ray_processor()` is called with a fully populated ray bundle and ground truth batch, just like the subclassed `next_train` in the above code. This code, however, is run in a background process.
 
 ```python
