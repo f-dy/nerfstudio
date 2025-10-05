@@ -17,11 +17,11 @@
 The DataManager batches and returns two components from an input dataset:
 
 1. A representation of viewpoint (either cameras or rays).
-    - For splatting methods (`FullImageDataManager`): a `Cameras` object.
-    - For ray sampling methods (`VanillaDataManager`): a `RayBundle` object.
+   - For splatting methods (`FullImageDataManager`): a `Cameras` object.
+   - For ray sampling methods (`VanillaDataManager`): a `RayBundle` object.
 2. A dictionary of ground truth data.
-    - For splatting methods (`FullImageDataManager`): dictionary contains complete images.
-    - For ray sampling methods (`VanillaDataManager`): dictionary contains per-ray information.
+   - For splatting methods (`FullImageDataManager`): dictionary contains complete images.
+   - For ray sampling methods (`VanillaDataManager`): dictionary contains per-ray information.
 
 Behaviors are defined by implementing the abstract methods required by the DataManager:
 
@@ -102,33 +102,39 @@ See the code!
 
 ## Creating Your Own
 
-We currently don't have other implementations because most papers follow the VanillaDataManager implementation. However, it should be straightforward to add a VanillaDataManager with logic that progressively adds cameras, for instance, by relying on the step and modifying RayBundle and RayGT generation logic.
+We currently don't have other implementations because most papers follow the `VanillaDataManager` implementation. However, it should be straightforward to add a `VanillaDataManager` with logic that progressively adds cameras, for instance, by relying on the step and modifying `RayBundle` and `RayGT` generation logic.
 
 ## Disk Caching for Large Datasets
-As of January 2025, the FullImageDatamanager and ParallelImageDatamanager implementations now support parallelized dataloading and dataloading from disk to avoid Out-Of-Memory errors and support very large datasets. To train a NeRF-based method with a large dataset that's unable to fit in memory, please add the `load_from_disk` flag to your `ns-train` command. For example with nerfacto:
+
+As of January 2025, the `FullImageDatamanager` and `ParallelImageDatamanager` implementations now support parallelized dataloading and dataloading from disk to avoid Out-Of-Memory errors and support very large datasets. To train a NeRF-based method with a large dataset that's unable to fit in memory, please add the `load_from_disk` flag to your `ns-train` command. For example with nerfacto:
+
 ```bash
 ns-train nerfacto --data {PROCESSED_DATA_DIR} --pipeline.datamanager.load-from-disk
 ```
 
 To train splatfacto with a large dataset that's unable to fit in memory, please set the device of `cache_images` to `"disk"`. For example with splatfacto:
+
 ```bash
 ns-train splatfacto --data {PROCESSED_DATA_DIR} --pipeline.datamanager.cache-images disk
 ```
 
 ## Image Tiling for Memory Efficiency
 
-The FullImageDatamanager supports automatic image tiling to reduce GPU memory usage when training with large images. When enabled, large images are split into smaller tiles that are processed individually, significantly reducing memory requirements.
+The `FullImageDatamanager` supports automatic image tiling to reduce GPU memory usage when training with large images. When enabled, large images are split into smaller tiles that are processed individually, significantly reducing memory requirements.
 
 To enable tiling, set `tile_size_max` to the maximum tile dimension in pixels:
+
 ```bash
 ns-train splatfacto --data {PROCESSED_DATA_DIR} --pipeline.datamanager.tile-size-max 512
 ```
 
 Key tiling parameters:
+
 - `tile_size_max`: Maximum tile size in pixels (default: 0, disabled). Images larger than this are split into tiles.
 - `tile_alignment`: Tile dimensions are rounded to multiples of this value for GPU efficiency (default: 16).
 
 Example with both memory optimizations:
+
 ```bash
 ns-train splatfacto --data {PROCESSED_DATA_DIR} \
   --pipeline.datamanager.cache-images cpu \
@@ -137,6 +143,7 @@ ns-train splatfacto --data {PROCESSED_DATA_DIR} \
 ```
 
 Tiling is particularly beneficial for:
+
 - High-resolution datasets (4K+ images)
 - Limited GPU memory scenarios
 - Training stability with large images
@@ -170,11 +177,12 @@ Checkout these flowcharts for more customization on large datasets!
 ```
 
 ## Migrating Your DataManager to the new DataManager
+
 Many methods subclass a DataManager and add extra data to it. If you would like your custom datamanager to also support new parallel features, you can migrate any custom dataloading logic to the new `custom_ray_processor()` API. This function takes in a full training batch (either image or ray bundle) and allows the user to modify or add to it. Let's take a look at an example for the LERF method, which was built on Nerfstudio's VanillaDataManager. This API provides an interface to attach new information to the RayBundle (for ray based methods), Cameras object (for splatting based methods), or ground truth dictionary. It runs in a background process if disk caching is enabled, otherwise it runs in the main process.
 
 Naively transfering code to `custom_ray_processor` may still OOM on very large datasets if initialization code requires computing something over the whole dataset. To fully take advantage of parallelization make sure your subclassed datamanager computes new information inside the `custom_ray_processor`, or caches a subset of the whole dataset. This can also still be slow if pre-computation requires GPU-heavy steps on the same GPU used for training.
 
-**Note**: Because the parallel DataManager uses background processes, any member of the DataManager needs to be *picklable* to be used inside `custom_ray_processor`.
+**Note**: Because the parallel DataManager uses background processes, any member of the DataManager needs to be _picklable_ to be used inside `custom_ray_processor`.
 
 ```python
 class LERFDataManager(VanillaDataManager):
