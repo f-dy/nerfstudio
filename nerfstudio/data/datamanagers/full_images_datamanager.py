@@ -264,6 +264,10 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         if tile_size_max <= 0:
             return [width], [height]
 
+        # Validate alignment
+        if tile_alignment <= 0:
+            raise ValueError(f"tile_alignment must be positive, got {tile_alignment}")
+
         # Calculate number of tiles needed
         num_tiles_x = math.ceil(width / tile_size_max)
         num_tiles_y = math.ceil(height / tile_size_max)
@@ -345,7 +349,16 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         return tiles
 
     def _adjust_camera_intrinsics_for_tile(
-        self, cameras: Cameras, tile_offset_x: int, tile_offset_y: int, tile_width: int, tile_height: int
+        self,
+        cameras: Cameras,
+        tile_offset_x: int,
+        tile_offset_y: int,
+        tile_width: int,
+        tile_height: int,
+        parent_camera_index: int = 0,
+        tile_row: int = 0,
+        tile_col: int = 0,
+        total_tiles: int = 1,
     ) -> Cameras:
         """Adjust camera intrinsics for a specific tile.
 
@@ -360,37 +373,55 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             tile_offset_y: Vertical offset of tile from image origin (pixels)
             tile_width: Width of the tile (pixels)
             tile_height: Height of the tile (pixels)
+            parent_camera_index: Index of the original camera this tile came from
+            tile_row: Row position in the tile grid (0 = top)
+            tile_col: Column position in the tile grid (0 = left)
+            total_tiles: Total number of tiles created from the original image
 
         Returns:
-            New Cameras object with adjusted intrinsics:
-            - cx adjusted by subtracting tile_offset_x
-            - cy adjusted by subtracting tile_offset_y
-            - width/height set to tile dimensions
-            - fx/fy preserved (lens properties don't change)
-            - camera_to_worlds preserved (extrinsic parameters don't change)
+            New Cameras object with adjusted intrinsics and debugging metadata
 
         Example:
-            >>> # Original camera: cx=57, cy=43, 128x80 image
-            >>> # Tile at offset (64, 40) with size 64x40
-            >>> adjusted = dm._adjust_camera_intrinsics_for_tile(cameras, 64, 40, 64, 40)
-            >>> adjusted.cx  # 57 - 64 = -7 (principal point now relative to tile)
-            tensor([-7.])
+            >>> adjusted = dm._adjust_camera_intrinsics_for_tile(cameras, 64, 40, 64, 40,
+            ...                                                  parent_camera_index=1, tile_row=1, tile_col=0)
+            >>> adjusted.metadata["tile_offset_x"]  # 64
         """
-        # Create a copy of the cameras
-        adjusted_cameras = cameras.clone()
+        # Create tile debugging metadata
+        tile_metadata = {
+            "parent_camera_index": parent_camera_index,
+            "tile_offset_x": tile_offset_x,
+            "tile_offset_y": tile_offset_y,
+            "tile_width": tile_width,
+            "tile_height": tile_height,
+            "original_width": cameras.width.item(),
+            "original_height": cameras.height.item(),
+            "tile_row": tile_row,
+            "tile_col": tile_col,
+            "total_tiles": total_tiles,
+        }
 
-        # Adjust principal point for tile offset
-        adjusted_cameras.cx = cameras.cx - tile_offset_x
-        adjusted_cameras.cy = cameras.cy - tile_offset_y
-
-        # Update image dimensions
-        adjusted_cameras.width = torch.tensor(tile_width, device=cameras.device, dtype=cameras.width.dtype)
-        adjusted_cameras.height = torch.tensor(tile_height, device=cameras.device, dtype=cameras.height.dtype)
+        # Merge with existing metadata
+        new_metadata = cameras.metadata.copy() if cameras.metadata else {}
+        new_metadata.update(tile_metadata)
+        # Create a new Cameras object with adjusted intrinsics
+        adjusted_cameras = Cameras(
+            fx=cameras.fx,
+            fy=cameras.fy,
+            cx=cameras.cx - tile_offset_x,
+            cy=cameras.cy - tile_offset_y,
+            width=torch.tensor([tile_width], device=cameras.width.device),
+            height=torch.tensor([tile_height], device=cameras.height.device),
+            camera_to_worlds=cameras.camera_to_worlds,
+            camera_type=cameras.camera_type,
+            distortion_params=cameras.distortion_params,
+            times=cameras.times,
+            metadata=new_metadata,
+        )
 
         return adjusted_cameras
 
     def _replicate_cameras_for_tiles(
-        self, cameras: Cameras, tile_widths: List[int], tile_heights: List[int]
+        self, cameras: Cameras, tile_widths: List[int], tile_heights: List[int], parent_camera_index: int = 0
     ) -> List[Cameras]:
         """Replicate and adjust cameras for each tile.
 
@@ -403,33 +434,30 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             cameras: Original camera parameters (single camera)
             tile_widths: List of tile widths that sum to image width
             tile_heights: List of tile heights that sum to image height
+            parent_camera_index: Index of the original camera this tile came from
 
         Returns:
-            List of Camera objects, one per tile, with adjusted intrinsics.
+            List of Camera objects, one per tile, with adjusted intrinsics and debugging metadata.
             Order matches tile ordering: [tile_0_0, tile_0_1, ..., tile_1_0, tile_1_1, ...]
-            Each camera has:
-            - Adjusted cx/cy for tile offset
-            - Tile-specific width/height
-            - Preserved fx/fy (focal lengths)
-            - Preserved camera_to_worlds (pose)
-
-        Example:
-            >>> # 2x2 tiling of 128x80 image
-            >>> tile_cameras = dm._replicate_cameras_for_tiles(cameras, [64, 64], [40, 40])
-            >>> len(tile_cameras)  # 4 cameras for 4 tiles
-            4
-            >>> tile_cameras[0].width, tile_cameras[0].height  # First tile dimensions
-            (tensor([64]), tensor([40]))
         """
         tile_cameras = []
+        total_tiles = len(tile_widths) * len(tile_heights)
         y_offset = 0
 
-        for tile_height in tile_heights:
+        for tile_row, tile_height in enumerate(tile_heights):
             x_offset = 0
-            for tile_width in tile_widths:
+            for tile_col, tile_width in enumerate(tile_widths):
                 # Adjust camera for this tile
                 tile_camera = self._adjust_camera_intrinsics_for_tile(
-                    cameras, x_offset, y_offset, tile_width, tile_height
+                    cameras,
+                    x_offset,
+                    y_offset,
+                    tile_width,
+                    tile_height,
+                    parent_camera_index,
+                    tile_row,
+                    tile_col,
+                    total_tiles,
                 )
                 tile_cameras.append(tile_camera)
                 x_offset += tile_width
@@ -581,7 +609,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
             # Create cameras for each tile
             original_camera = original_cameras[img_idx].reshape(())
-            tile_cameras = self._replicate_cameras_for_tiles(original_camera, tile_widths, tile_heights)
+            tile_cameras = self._replicate_cameras_for_tiles(original_camera, tile_widths, tile_heights, img_idx)
 
             # Add each tile as a separate image
             for tile_idx, (tile_image, tile_camera) in enumerate(zip(image_tiles, tile_cameras)):
@@ -628,16 +656,6 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             self.tile_to_original_mapping = tile_mapping
 
         return tiled_images
-
-    def _get_tiled_images_lazy(self, split: Literal["train", "eval"]) -> List[Dict[str, torch.Tensor]]:
-        """Get tiled images with lazy computation."""
-        if split not in self._tiled_cache:
-            if split in self._original_images:
-                CONSOLE.log(f"Computing tiles on-demand for {split}")
-                self._tiled_cache[split] = self._apply_tiling_to_images(self._original_images[split], split)
-            else:
-                raise ValueError(f"No original images stored for lazy tiling in split: {split}")
-        return self._tiled_cache[split]
 
     def create_train_dataset(self) -> TDataset:
         """Sets up the data loaders for training"""
