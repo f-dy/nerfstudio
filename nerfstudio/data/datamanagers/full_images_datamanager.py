@@ -64,32 +64,39 @@ class FullImageDatamanagerConfig(DataManagerConfig):
     """When not evaluating on all images, number of iterations before picking
     new images. If -1, never pick new images."""
     cache_images: Literal["cpu", "gpu", "disk"] = "gpu"
-    """Where to cache images in memory. 
-        - If "cpu", caches images on cpu RAM as pytorch tensors. 
-        - If "gpu", caches images on device as pytorch tensors. 
+    """Where to cache images in memory.
+        - If "cpu", caches images on cpu RAM as pytorch tensors.
+        - If "gpu", caches images on device as pytorch tensors.
         - If "disk", keeps images on disk which conserves memory. Datamanager will use parallel dataloader"""
     cache_images_type: Literal["uint8", "float32"] = "float32"
     """The image type returned from manager, caching images in uint8 saves memory"""
     max_thread_workers: Optional[int] = None
     """The maximum number of threads to use for caching images. If None, uses all available threads."""
     train_cameras_sampling_strategy: Literal["random", "fps"] = "random"
-    """Specifies which sampling strategy is used to generate train cameras, 'random' means sampling 
-    uniformly random without replacement, 'fps' means farthest point sampling which is helpful to reduce the artifacts 
+    """Specifies which sampling strategy is used to generate train cameras, 'random' means sampling
+    uniformly random without replacement, 'fps' means farthest point sampling which is helpful to reduce the artifacts
     due to oversampling subsets of cameras that are very close to each other."""
     train_cameras_sampling_seed: int = 42
-    """Random seed for sampling train cameras. Fixing seed may help reduce variance of trained models across 
+    """Random seed for sampling train cameras. Fixing seed may help reduce variance of trained models across
     different runs."""
     fps_reset_every: int = 100
     """The number of iterations before one resets fps sampler repeatly, which is essentially drawing fps_reset_every
     samples from the pool of all training cameras without replacement before a new round of sampling starts."""
     dataloader_num_workers: int = 4
-    """The number of workers performing the dataloading from either disk/RAM, which 
+    """The number of workers performing the dataloading from either disk/RAM, which
     includes collating, pixel sampling, unprojecting, ray generation etc."""
     prefetch_factor: Optional[int] = 4
-    """The limit number of batches a worker will start loading once an iterator is created. 
+    """The limit number of batches a worker will start loading once an iterator is created.
     More details are described here: https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader"""
     cache_compressed_images: bool = False
     """If True, cache raw image files as byte strings to RAM."""
+    tile_size_max: int = 0
+    """Maximum tile size in pixels. If 0 or negative, tiling is disabled.
+    When enabled, images are split into balanced tiles of approximately this size
+    to reduce GPU memory usage during training."""
+    tile_alignment: int = 16
+    """Tile dimensions must be multiples of this value for optimal GPU performance.
+    Should match the renderer's internal tile size (e.g., 16 for gsplat)."""
 
 
 class FullImageDatamanager(DataManager, Generic[TDataset]):
@@ -121,6 +128,20 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         self.device = device
         self.world_size = world_size
         self.local_rank = local_rank
+
+        # Validate tiling parameters
+        if config.tile_size_max > 0:
+            if config.tile_alignment <= 0:
+                raise ValueError(f"tile_alignment must be positive when tiling is enabled, got {config.tile_alignment}")
+            if config.tile_size_max < config.tile_alignment:
+                raise ValueError(
+                    f"tile_size_max ({config.tile_size_max}) must be >= tile_alignment ({config.tile_alignment})"
+                )
+            CONSOLE.log(f"Tiling enabled: tile_size_max={config.tile_size_max}, tile_alignment={config.tile_alignment}")
+
+        # Initialize tile mapping (for debugging)
+        self.tile_to_original_mapping: Optional[List[int]] = None
+
         self.sampler = None
         self.test_mode = test_mode
         self.test_split = "test" if test_mode in ["test", "inference"] else "val"
@@ -198,6 +219,111 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         assert self.config.cache_images != "disk", "Can not call _load_images() with `disk` as input"
         return self._load_images("eval", cache_images_device=self.config.cache_images)
 
+    def _calculate_balanced_tile_sizes(
+        self, width: int, height: int, tile_size_max: int, tile_alignment: int
+    ) -> Tuple[List[int], List[int]]:
+        """Calculate balanced tile sizes that are similar in dimensions."""
+        import math
+
+        # Disable tiling if tile_size_max <= 0
+        if tile_size_max <= 0:
+            return [width], [height]
+
+        # Calculate number of tiles needed
+        num_tiles_x = math.ceil(width / tile_size_max)
+        num_tiles_y = math.ceil(height / tile_size_max)
+
+        # If no tiling needed (image smaller than max), return full image
+        if num_tiles_x == 1 and num_tiles_y == 1:
+            return [width], [height]
+
+        # Calculate base tile sizes (evenly distributed, aligned)
+        base_tile_width = width // num_tiles_x
+        base_tile_height = height // num_tiles_y
+
+        # Round base sizes to alignment multiples (with minimum size check)
+        aligned_tile_width = max(tile_alignment, round(base_tile_width / tile_alignment) * tile_alignment)
+        aligned_tile_height = max(tile_alignment, round(base_tile_height / tile_alignment) * tile_alignment)
+
+        # Safety check: ensure aligned tiles don't exceed max
+        if aligned_tile_width > tile_size_max or aligned_tile_height > tile_size_max:
+            raise ValueError(f"Image too large for tile_size_max={tile_size_max} with alignment={tile_alignment}")
+
+        # Create tile size lists with aligned sizes
+        tile_widths = [aligned_tile_width] * num_tiles_x
+        tile_heights = [aligned_tile_height] * num_tiles_y
+
+        # Calculate total pixels used by aligned tiles
+        total_aligned_width = aligned_tile_width * num_tiles_x
+        total_aligned_height = aligned_tile_height * num_tiles_y
+
+        # Add remaining pixels to the last tile (edge tiles can be non-aligned)
+        if total_aligned_width != width:
+            tile_widths[-1] += width - total_aligned_width
+        if total_aligned_height != height:
+            tile_heights[-1] += height - total_aligned_height
+
+        # Safety check: ensure last tiles don't exceed tile_size_max
+        if tile_widths[-1] > tile_size_max or tile_heights[-1] > tile_size_max:
+            raise ValueError(f"Edge tiles would exceed tile_size_max={tile_size_max}")
+
+        return tile_widths, tile_heights
+
+    def _tile_undistorted_image(
+        self, image: torch.Tensor, tile_widths: List[int], tile_heights: List[int]
+    ) -> List[torch.Tensor]:
+        """Split image into tiles using calculated dimensions."""
+        tiles = []
+        y_offset = 0
+
+        for tile_height in tile_heights:
+            x_offset = 0
+            for tile_width in tile_widths:
+                # Extract tile from image
+                tile = image[y_offset : y_offset + tile_height, x_offset : x_offset + tile_width]
+                tiles.append(tile)
+                x_offset += tile_width
+            y_offset += tile_height
+
+        return tiles
+
+    def _adjust_camera_intrinsics_for_tile(
+        self, cameras: Cameras, tile_offset_x: int, tile_offset_y: int, tile_width: int, tile_height: int
+    ) -> Cameras:
+        """Adjust camera intrinsics for a specific tile."""
+        # Create a copy of the cameras
+        adjusted_cameras = cameras.clone()
+
+        # Adjust principal point for tile offset
+        adjusted_cameras.cx = cameras.cx - tile_offset_x
+        adjusted_cameras.cy = cameras.cy - tile_offset_y
+
+        # Update image dimensions
+        adjusted_cameras.width = torch.tensor(tile_width, device=cameras.device, dtype=cameras.width.dtype)
+        adjusted_cameras.height = torch.tensor(tile_height, device=cameras.device, dtype=cameras.height.dtype)
+
+        return adjusted_cameras
+
+    def _replicate_cameras_for_tiles(
+        self, cameras: Cameras, tile_widths: List[int], tile_heights: List[int]
+    ) -> List[Cameras]:
+        """Replicate and adjust cameras for each tile."""
+        tile_cameras = []
+        y_offset = 0
+
+        for tile_height in tile_heights:
+            x_offset = 0
+            for tile_width in tile_widths:
+                # Adjust camera for this tile
+                tile_camera = self._adjust_camera_intrinsics_for_tile(
+                    cameras, x_offset, y_offset, tile_width, tile_height
+                )
+                tile_cameras.append(tile_camera)
+                x_offset += tile_width
+            y_offset += tile_height
+
+        return tile_cameras
+
     def _load_images(
         self, split: Literal["train", "eval"], cache_images_device: Literal["cpu", "gpu"]
     ) -> List[Dict[str, torch.Tensor]]:
@@ -266,7 +392,97 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
                 self.train_cameras = self.train_dataset.cameras
         else:
             assert_never(cache_images_device)
+
+        # NEW: Apply tiling if enabled
+        if self.config.tile_size_max > 0:
+            undistorted_images = self._apply_tiling_to_images(undistorted_images, split)
+
         return undistorted_images
+
+    def _apply_tiling_to_images(
+        self, images: List[Dict[str, torch.Tensor]], split: Literal["train", "eval"]
+    ) -> List[Dict[str, torch.Tensor]]:
+        """Apply tiling to undistorted images and update cameras accordingly."""
+        tiled_images = []
+        tiled_cameras_list = []
+        tile_mapping = []  # Track which original image each tile came from
+        original_count = len(images)
+
+        # Get the appropriate dataset and cameras
+        if split == "train":
+            dataset = self.train_dataset
+            original_cameras = self.train_cameras
+        elif split == "eval":
+            dataset = self.eval_dataset
+            original_cameras = dataset.cameras
+        else:
+            assert_never(split)
+
+        for img_idx, image_data in enumerate(images):
+            image = image_data["image"]  # [H, W, C]
+            height, width = image.shape[:2]
+
+            # Calculate tile sizes for this image
+            tile_widths, tile_heights = self._calculate_balanced_tile_sizes(
+                width, height, self.config.tile_size_max, self.config.tile_alignment
+            )
+
+            # If no tiling needed (single tile), keep original
+            if len(tile_widths) == 1 and len(tile_heights) == 1:
+                tiled_images.append(image_data)
+                tiled_cameras_list.append(original_cameras[img_idx])
+                tile_mapping.append(img_idx)
+                continue
+
+            # Tile the image
+            image_tiles = self._tile_undistorted_image(image, tile_widths, tile_heights)
+
+            # Create cameras for each tile
+            original_camera = original_cameras[img_idx].reshape(())
+            tile_cameras = self._replicate_cameras_for_tiles(original_camera, tile_widths, tile_heights)
+
+            # Add each tile as a separate image
+            for tile_idx, (tile_image, tile_camera) in enumerate(zip(image_tiles, tile_cameras)):
+                tile_data = image_data.copy()
+                tile_data["image"] = tile_image
+
+                # Handle other data (mask, depth) if present
+                if "mask" in image_data:
+                    mask_tiles = self._tile_undistorted_image(image_data["mask"], tile_widths, tile_heights)
+                    tile_data["mask"] = mask_tiles[tile_idx]
+
+                if "depth" in image_data:
+                    depth_tiles = self._tile_undistorted_image(image_data["depth"], tile_widths, tile_heights)
+                    tile_data["depth"] = depth_tiles[tile_idx]
+
+                tiled_images.append(tile_data)
+                tiled_cameras_list.append(tile_camera)
+                tile_mapping.append(img_idx)  # Track original image index
+
+        # Update cameras for this split
+        if len(tiled_cameras_list) > 0:
+            # Stack all tile cameras into a single Cameras object
+            tiled_cameras = tiled_cameras_list[0]
+            for cam in tiled_cameras_list[1:]:
+                tiled_cameras = tiled_cameras.cat([tiled_cameras, cam])
+
+            if split == "train":
+                self.train_cameras = tiled_cameras
+            # Note: eval cameras are handled differently, updated in dataset
+
+        # Log tiling statistics
+        tiled_count = len(tiled_images)
+        if tiled_count > original_count:
+            memory_multiplier = tiled_count / original_count
+            CONSOLE.log(f"Tiling {split}: {original_count} → {tiled_count} images ({memory_multiplier:.1f}x memory)")
+            if memory_multiplier > 4.0:
+                CONSOLE.log(f"[yellow]Warning: Tiling increases memory usage by {memory_multiplier:.1f}x[/yellow]")
+
+        # Store tile mapping for debugging
+        if split == "train":
+            self.tile_to_original_mapping = tile_mapping
+
+        return tiled_images
 
     def create_train_dataset(self) -> TDataset:
         """Sets up the data loaders for training"""
