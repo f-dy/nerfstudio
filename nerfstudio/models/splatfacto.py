@@ -396,19 +396,12 @@ class SplatfactoModel(Model):
         if not self.training:
             return False
 
-        # Always GC after SH degree increases
+        # Always GC after SH degree increases (unique timing, not covered by gsplat)
         if self.step % self.config.sh_degree_interval == 0 and self.step > 0:
             return True
 
-        # Adaptive GC during densification period
-        if self.step <= self.config.stop_split_at:
-            current_sh_degree = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
-            # More frequent GC when at maximum SH degree (highest memory pressure)
-            gc_interval = 50 if current_sh_degree == self.config.sh_degree else 100
-            return self.step % gc_interval == 0
-
-        # Occasional GC during stable period
-        if self.step % 500 == 0:
+        # GC during stable period after densification stops (gsplat GC stops at stop_split_at)
+        if self.step > self.config.stop_split_at and self.step % 500 == 0:
             return True
 
         return False
