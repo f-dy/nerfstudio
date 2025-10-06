@@ -613,7 +613,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             image_tiles = self._tile_undistorted_image(image, tile_widths, tile_heights)
 
             # Create cameras for each tile
-            original_camera = original_cameras[img_idx].reshape(())
+            original_camera = original_cameras[img_idx : img_idx + 1]  # Keep batch dimension
             tile_cameras = self._replicate_cameras_for_tiles(original_camera, tile_widths, tile_heights, img_idx)
 
             # Add each tile as a separate image
