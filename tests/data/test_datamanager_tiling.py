@@ -39,12 +39,11 @@ class TestTilingCore:
 
     def setup_method(self):
         """Set up test fixtures"""
-        # Create a minimal mock config to avoid full datamanager initialization
         self.config = MockConfig()
-        self.datamanager = FullImageDatamanager.__new__(FullImageDatamanager)  # Skip __init__
+        self.datamanager = FullImageDatamanager.__new__(FullImageDatamanager)
 
-    def test_balanced_tile_sizes_comprehensive(self):
-        """Test balanced tile size calculation with various scenarios"""
+    def test_tile_size_calculation(self):
+        """Test balanced tile size calculation with alignment constraints"""
         test_cases = [
             # (width, height, tile_size_max, tile_alignment, expected_widths, expected_heights)
             (128, 80, 64, 16, [64, 64], [48, 32]),  # Exact division with alignment
@@ -70,8 +69,8 @@ class TestTilingCore:
                 for h in tile_heights[:-1]:  # All but last tile should be aligned
                     assert h % tile_alignment == 0, f"Tile height {h} not aligned to {tile_alignment}"
 
-    def test_image_tiling_pixel_perfect(self):
-        """Test that image tiling produces pixel-perfect reconstruction"""
+    def test_image_reconstruction(self):
+        """Test that tiled images can be perfectly reconstructed"""
         # Create test image
         original_image = torch.rand(80, 128, 3)  # 80x128 RGB image
 
@@ -98,8 +97,8 @@ class TestTilingCore:
         # Verify pixel-perfect reconstruction
         assert torch.allclose(original_image, reconstructed, atol=1e-6), "Reconstruction not pixel-perfect"
 
-    def test_edge_cases(self):
-        """Test edge cases and error conditions"""
+    def test_edge_cases_and_validation(self):
+        """Test edge cases, error conditions, and parameter validation"""
         # Test very small images
         tiny_widths, tiny_heights = self.datamanager._calculate_balanced_tile_sizes(16, 16, 64, 16)
         assert tiny_widths == [16] and tiny_heights == [16], "Small images should not be tiled"
@@ -109,8 +108,8 @@ class TestTilingCore:
             # Image that can't be aligned properly
             self.datamanager._calculate_balanced_tile_sizes(100, 100, 15, 32)
 
-    def test_realistic_scenarios(self):
-        """Test tiling with realistic image dimensions"""
+    def test_realistic_image_dimensions(self):
+        """Test tiling with realistic image dimensions (HD, 4K, etc.)"""
         test_scenarios = [
             # (width, height, tile_size_max, description)
             (1920, 1080, 512, "Full HD"),
@@ -130,8 +129,8 @@ class TestTilingCore:
             assert all(w <= tile_size_max + 16 for w in tile_widths), f"{description}: Tile too wide"
             assert all(h <= tile_size_max + 16 for h in tile_heights), f"{description}: Tile too tall"
 
-    def test_config_validation(self):
-        """Test configuration parameter validation"""
+    def test_configuration_parameters(self):
+        """Test various tiling configuration parameter combinations"""
         # Test valid configurations
         valid_configs = [
             {"tile_size_max": 0, "tile_alignment": 16},  # Disabled
@@ -148,11 +147,11 @@ class TestTilingCore:
             assert isinstance(tile_heights, list)
 
 
-class TestTilingIntrinsics:
-    """Camera intrinsics validation tests"""
+class TestCameraHandling:
+    """Camera intrinsics and extrinsics handling during tiling"""
 
-    def test_camera_intrinsics_and_replication(self):
-        """Test camera intrinsics calculations and replication for tiling scenarios"""
+    def test_intrinsics_adjustment(self):
+        """Test camera intrinsics adjustment and replication for tiles"""
         # Test exact division: 128×80 → 2×2 tiles
         original_cx, original_cy = 57.0, 43.0
         tile_widths = [64, 64]
@@ -202,9 +201,8 @@ class TestTilingIntrinsics:
             assert torch.allclose(tile_cameras[i].fx, cameras.fx), f"Tile {i} fx should be preserved"
             assert torch.allclose(tile_cameras[i].fy, cameras.fy), f"Tile {i} fy should be preserved"
 
-    def test_tiling_path_vs_no_tiling_identical_results(self):
-        """Test that tiling path gives identical results to no-tiling path when no actual tiling occurs.
-        This test mimics exactly how splatfacto training accesses the datamanager."""
+    def test_no_tiling_vs_tiling_equivalence(self):
+        """Test that no-tiling and tiling paths give identical results when no actual tiling occurs"""
         import os
         import tempfile
         from pathlib import Path
@@ -457,8 +455,8 @@ class TestTilingIntrinsics:
 
             print("\n✅ SUCCESS: Tiling path preserves all camera parameters and image data correctly!")
 
-    def test_actual_tiling_preserves_camera_extrinsics(self):
-        """Test that camera extrinsics are preserved correctly when actual tiling occurs."""
+    def test_extrinsics_preservation_with_tiling(self):
+        """Test that camera extrinsics are preserved when actual tiling occurs"""
         # Create test cameras with different extrinsics
         camera0_to_world = torch.tensor(
             [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 2.0], [0.0, 0.0, 1.0, 3.0], [0.0, 0.0, 0.0, 1.0]]
@@ -523,8 +521,8 @@ class TestTilingIntrinsics:
 
         print("✅ SUCCESS: Actual tiling preserves camera extrinsics correctly!")
 
-    def test_camera_extrinsics_preservation_comprehensive(self):
-        """Test that camera extrinsics are preserved correctly in all tiling scenarios"""
+    def test_extrinsics_preservation_comprehensive(self):
+        """Test camera extrinsics preservation in all tiling scenarios (no-tiling and actual tiling)"""
         # Create 2 cameras with different extrinsics
         camera0_to_world = torch.tensor(
             [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 2.0], [0.0, 0.0, 1.0, 3.0], [0.0, 0.0, 0.0, 1.0]]
@@ -595,8 +593,8 @@ class TestTilingIntrinsics:
             4,
         ), f"Wrong camera_to_worlds shape: {datamanager.train_cameras.camera_to_worlds.shape}"
 
-    def test_tiling_correspondence_and_mapping(self):
-        """Test that tiled images, cameras, and mappings maintain correct correspondence"""
+    def test_image_camera_correspondence(self):
+        """Test that tiled images and cameras maintain correct correspondence and mapping"""
         # Create test image with unique pixel values for each tile region
         test_image = torch.zeros(80, 128, 3)  # 80x128 RGB
         test_image[0:40, 0:64, :] = 1.0  # Top-left = 1.0
@@ -664,8 +662,8 @@ class TestTilingIntrinsics:
         assert tile_mapping == expected_mapping, f"Expected {expected_mapping}, got {tile_mapping}"
         assert set(tile_mapping) == {0, 1, 2}, "All original images should be represented"
 
-    def test_splatfacto_compatibility_and_metadata(self):
-        """Test splatfacto compatibility and debugging metadata"""
+    def test_splatfacto_compatibility(self):
+        """Test splatfacto compatibility requirements and debugging metadata"""
         # Test single camera (should work with splatfacto)
         single_camera = Cameras(
             fx=torch.tensor([100.0]),
@@ -739,8 +737,8 @@ class TestTilingIntrinsics:
             indexed_camera = tiled_cameras[i : i + 1]
             assert indexed_camera.shape[0] == 1, f"Indexed camera {i} should pass splatfacto assertion"
 
-    def test_eval_images_not_tiled_and_alignment(self):
-        """Test that eval images are not tiled and alignment constraints work"""
+    def test_eval_mode_and_alignment(self):
+        """Test that eval images are not tiled and alignment constraints work properly"""
         # Test eval images are not tiled
         config = MockConfig()
         config.tile_size_max = 64  # Will tile train images
@@ -773,11 +771,11 @@ class TestTilingIntrinsics:
                 assert h % alignment == 0, f"Non-edge tile height {h} not aligned to {alignment}"
 
 
-class TestTilingValidation:
-    """Integration and validation tests"""
+class TestTilingIntegration:
+    """End-to-end tiling pipeline integration tests"""
 
-    def test_complete_tiling_pipeline_and_error_conditions(self):
-        """Test the complete tiling pipeline with realistic data and error handling"""
+    def test_complete_pipeline(self):
+        """Test complete tiling pipeline with realistic data and error handling"""
         # Test complete pipeline
         width, height = 256, 256
         test_image = torch.rand(height, width, 3)
