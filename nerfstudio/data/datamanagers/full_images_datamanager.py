@@ -97,6 +97,8 @@ class FullImageDatamanagerConfig(DataManagerConfig):
     tile_alignment: int = 16
     """Tile dimensions must be multiples of this value for optimal GPU performance.
     Should match the renderer's internal tile size (e.g., 16 for gsplat)."""
+    tile_scale_iterations: bool = True
+    """Automatically scale iteration-based parameters when tiling is used"""
 
 
 class FullImageDatamanager(DataManager, Generic[TDataset]):
@@ -168,6 +170,19 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train")
         self.train_dataset = self.create_train_dataset()
         self.eval_dataset = self.create_eval_dataset()
+
+        # Calculate iteration scaling factor for tiling
+        original_train_count = len(self.train_dataparser_outputs.image_filenames)
+        tiled_train_count = len(self.train_dataset)
+        self.iteration_scale_factor = tiled_train_count / original_train_count if original_train_count > 0 else 1.0
+
+        # Scale datamanager parameters if tiling is enabled
+        if self.config.tile_scale_iterations and self.iteration_scale_factor > 1.0:
+            self.config.fps_reset_every = int(self.config.fps_reset_every * self.iteration_scale_factor)
+            CONSOLE.log(f"Tiling detected: {tiled_train_count} tiles from {original_train_count} images")
+            CONSOLE.log(f"Iteration scale factor: {self.iteration_scale_factor:.2f}")
+            CONSOLE.log(f"Scaled fps_reset_every: {self.config.fps_reset_every}")
+
         if len(self.train_dataset) > 500 and self.config.cache_images == "gpu":
             CONSOLE.print(
                 "Train dataset has over 500 images, overriding cache_images to cpu. If you still get OOM errors or segfault, please consider seting cache_images to 'disk'",

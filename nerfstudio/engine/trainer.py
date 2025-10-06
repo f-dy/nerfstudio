@@ -162,6 +162,32 @@ class Trainer:
             local_rank=self.local_rank,
             grad_scaler=self.grad_scaler,
         )
+
+        # Apply iteration scaling to trainer config if tiling is enabled
+        if (
+            hasattr(self.pipeline.datamanager, "iteration_scale_factor")
+            and self.pipeline.datamanager.iteration_scale_factor > 1.0
+        ):
+            scale = self.pipeline.datamanager.iteration_scale_factor
+
+            # Scale trainer config parameters
+            self.config.max_num_iterations = int(self.config.max_num_iterations * scale)
+            self.config.steps_per_eval_image = int(self.config.steps_per_eval_image * scale)
+            self.config.steps_per_save = int(self.config.steps_per_save * scale)
+            self.config.steps_per_eval_all_images = int(self.config.steps_per_eval_all_images * scale)
+
+            CONSOLE.log(f"Scaled trainer config for tiling (scale factor: {scale:.2f}):")
+            CONSOLE.log(
+                f"  max_num_iterations: {int(self.config.max_num_iterations / scale)} → {self.config.max_num_iterations}"
+            )
+            CONSOLE.log(
+                f"  steps_per_eval_image: {int(self.config.steps_per_eval_image / scale)} → {self.config.steps_per_eval_image}"
+            )
+            CONSOLE.log(f"  steps_per_save: {int(self.config.steps_per_save / scale)} → {self.config.steps_per_save}")
+            CONSOLE.log(
+                f"  steps_per_eval_all_images: {int(self.config.steps_per_eval_all_images / scale)} → {self.config.steps_per_eval_all_images}"
+            )
+
         self.optimizers = self.setup_optimizers()
 
         # set up viewer if enabled

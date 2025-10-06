@@ -276,6 +276,48 @@ class VanillaPipeline(Pipeline):
         )
         self.model.to(device)
 
+        # Apply iteration scaling if tiling is enabled
+        if hasattr(self.datamanager, "iteration_scale_factor") and self.datamanager.iteration_scale_factor > 1.0:
+            scale = self.datamanager.iteration_scale_factor
+            scaled_params = []
+
+            # Scale model config parameters (for splatfacto)
+            if hasattr(self.model.config, "warmup_length"):
+                old_val = self.model.config.warmup_length
+                self.model.config.warmup_length = int(old_val * scale)
+                scaled_params.append(f"warmup_length: {old_val} → {self.model.config.warmup_length}")
+            if hasattr(self.model.config, "refine_every"):
+                old_val = self.model.config.refine_every
+                self.model.config.refine_every = int(old_val * scale)
+                scaled_params.append(f"refine_every: {old_val} → {self.model.config.refine_every}")
+            if hasattr(self.model.config, "resolution_schedule"):
+                old_val = self.model.config.resolution_schedule
+                self.model.config.resolution_schedule = int(old_val * scale)
+                scaled_params.append(f"resolution_schedule: {old_val} → {self.model.config.resolution_schedule}")
+            if hasattr(self.model.config, "reset_alpha_every"):
+                old_val = self.model.config.reset_alpha_every
+                self.model.config.reset_alpha_every = int(old_val * scale)
+                scaled_params.append(f"reset_alpha_every: {old_val} → {self.model.config.reset_alpha_every}")
+            if hasattr(self.model.config, "sh_degree_interval"):
+                old_val = self.model.config.sh_degree_interval
+                self.model.config.sh_degree_interval = int(old_val * scale)
+                scaled_params.append(f"sh_degree_interval: {old_val} → {self.model.config.sh_degree_interval}")
+            if hasattr(self.model.config, "stop_screen_size_at"):
+                old_val = self.model.config.stop_screen_size_at
+                self.model.config.stop_screen_size_at = int(old_val * scale)
+                scaled_params.append(f"stop_screen_size_at: {old_val} → {self.model.config.stop_screen_size_at}")
+            if hasattr(self.model.config, "stop_split_at"):
+                old_val = self.model.config.stop_split_at
+                self.model.config.stop_split_at = int(old_val * scale)
+                scaled_params.append(f"stop_split_at: {old_val} → {self.model.config.stop_split_at}")
+
+            if scaled_params:
+                from nerfstudio.utils.rich_utils import CONSOLE
+
+                CONSOLE.log("Scaled model config for tiling:")
+                for param in scaled_params:
+                    CONSOLE.log(f"  {param}")
+
         self.world_size = world_size
         if world_size > 1:
             self._model = typing.cast(Model, DDP(self._model, device_ids=[local_rank], find_unused_parameters=True))
@@ -421,9 +463,9 @@ class VanillaPipeline(Pipeline):
         self, step: Optional[int] = None, output_path: Optional[Path] = None, get_std: bool = False
     ):
         """Get the average metrics for evaluation images."""
-        assert hasattr(self.datamanager, "fixed_indices_eval_dataloader"), (
-            "datamanager must have 'fixed_indices_eval_dataloader' attribute"
-        )
+        assert hasattr(
+            self.datamanager, "fixed_indices_eval_dataloader"
+        ), "datamanager must have 'fixed_indices_eval_dataloader' attribute"
         image_prefix = "eval"
         return self.get_average_image_metrics(
             self.datamanager.fixed_indices_eval_dataloader,  # type: ignore
