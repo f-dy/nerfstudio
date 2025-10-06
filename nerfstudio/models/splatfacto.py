@@ -138,6 +138,8 @@ class SplatfactoModelConfig(ModelConfig):
     """
     output_depth_during_training: bool = False
     """If True, output depth during training. Otherwise, only output depth during evaluation."""
+    garbage_collection: bool = False
+    """If True, perform strategic garbage collection during training to reduce OOM risk."""
     rasterize_mode: Literal["classic", "antialiased"] = "classic"
     """
     Classic mode of rendering will use the EWA volume splatting with a [0.3, 0.3] screen space blurring kernel. This
@@ -384,6 +386,40 @@ class SplatfactoModel(Model):
             )
         else:
             raise ValueError(f"Unknown strategy {self.strategy}")
+
+        # Perform garbage collection if enabled
+        if self.config.garbage_collection:
+            self._perform_garbage_collection_if_needed()
+
+    def _should_garbage_collect(self) -> bool:
+        """Determine if garbage collection should be performed at current step."""
+        if not self.training:
+            return False
+
+        # Always GC after SH degree increases
+        if self.step % self.config.sh_degree_interval == 0 and self.step > 0:
+            return True
+
+        # Adaptive GC during densification period
+        if self.step <= self.config.stop_split_at:
+            current_sh_degree = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
+            # More frequent GC when at maximum SH degree (highest memory pressure)
+            gc_interval = 50 if current_sh_degree == self.config.sh_degree else 100
+            return self.step % gc_interval == 0
+
+        # Occasional GC during stable period
+        if self.step % 500 == 0:
+            return True
+
+        return False
+
+    def _perform_garbage_collection_if_needed(self):
+        """Perform garbage collection with logging if conditions are met."""
+        if self._should_garbage_collect():
+            torch.cuda.empty_cache()
+            # Log occasionally to avoid spam, but always log SH degree increases
+            if self.step % self.config.sh_degree_interval == 0 or self.step % 1000 == 0:
+                CONSOLE.log(f"[dim]Garbage collection at step {self.step}")
 
     def get_training_callbacks(
         self, training_callback_attributes: TrainingCallbackAttributes
