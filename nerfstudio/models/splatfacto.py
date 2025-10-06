@@ -386,7 +386,8 @@ class SplatfactoModel(Model):
             raise ValueError(f"Unknown strategy {self.strategy}")
 
         # Perform complementary garbage collection (gsplat handles densification GC)
-        self._perform_garbage_collection_if_needed()
+        if self._should_garbage_collect():
+            torch.cuda.empty_cache()
 
     def _should_garbage_collect(self) -> bool:
         """Determine if garbage collection should be performed at current step."""
@@ -407,14 +408,6 @@ class SplatfactoModel(Model):
             return True
 
         return False
-
-    def _perform_garbage_collection_if_needed(self):
-        """Perform garbage collection with logging if conditions are met."""
-        if self._should_garbage_collect():
-            torch.cuda.empty_cache()
-            # Log occasionally to avoid spam, but always log SH degree increases
-            if self.step % self.config.sh_degree_interval == 0 or self.step % 1000 == 0:
-                CONSOLE.log(f"[dim]Garbage collection at step {self.step}")
 
     def get_training_callbacks(
         self, training_callback_attributes: TrainingCallbackAttributes
