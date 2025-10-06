@@ -138,8 +138,6 @@ class SplatfactoModelConfig(ModelConfig):
     """
     output_depth_during_training: bool = False
     """If True, output depth during training. Otherwise, only output depth during evaluation."""
-    garbage_collection: bool = False
-    """If True, perform strategic garbage collection during training to reduce OOM risk."""
     rasterize_mode: Literal["classic", "antialiased"] = "classic"
     """
     Classic mode of rendering will use the EWA volume splatting with a [0.3, 0.3] screen space blurring kernel. This
@@ -387,9 +385,8 @@ class SplatfactoModel(Model):
         else:
             raise ValueError(f"Unknown strategy {self.strategy}")
 
-        # Perform garbage collection if enabled
-        if self.config.garbage_collection:
-            self._perform_garbage_collection_if_needed()
+        # Perform complementary garbage collection (gsplat handles densification GC)
+        self._perform_garbage_collection_if_needed()
 
     def _should_garbage_collect(self) -> bool:
         """Determine if garbage collection should be performed at current step."""
