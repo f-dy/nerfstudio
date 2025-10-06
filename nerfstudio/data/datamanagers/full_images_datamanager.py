@@ -605,7 +605,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             # If no tiling needed (single tile), keep original
             if len(tile_widths) == 1 and len(tile_heights) == 1:
                 tiled_images.append(image_data)
-                tiled_cameras_list.append(original_cameras[img_idx])
+                tiled_cameras_list.append(original_cameras[img_idx : img_idx + 1])  # Keep batch dimension
                 tile_mapping.append(img_idx)
                 continue
 

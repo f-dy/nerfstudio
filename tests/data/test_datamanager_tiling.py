@@ -354,6 +354,726 @@ class TestTilingIntrinsics:
             assert torch.allclose(tile_cameras[i].fx, cameras.fx), f"Tile {i} fx should be preserved"
             assert torch.allclose(tile_cameras[i].fy, cameras.fy), f"Tile {i} fy should be preserved"
 
+    def test_tiling_path_vs_no_tiling_identical_results(self):
+        """Test that tiling path gives identical results to no-tiling path when no actual tiling occurs.
+        This test mimics exactly how splatfacto training accesses the datamanager."""
+        import os
+        import tempfile
+        from pathlib import Path
+
+        import numpy as np
+        from PIL import Image
+
+        from nerfstudio.data.datamanagers.full_images_datamanager import (
+            FullImageDatamanager,
+            FullImageDatamanagerConfig,
+        )
+        from nerfstudio.data.dataparsers.base_dataparser import DataparserOutputs
+        from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
+        from nerfstudio.data.datasets.base_dataset import InputDataset
+        from nerfstudio.data.scene_box import SceneBox
+
+        # Create temporary directory for dummy images
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create 2 dummy images with different uniform colors and different sizes
+            image0 = torch.full((80, 120, 3), 0.2)  # Gray image: 80x120
+            image1 = torch.full((60, 100, 3), 0.8)  # Light gray image: 60x100
+
+            # Save dummy images as actual PNG files
+            image0_path = os.path.join(temp_dir, "image0.png")
+            image1_path = os.path.join(temp_dir, "image1.png")
+
+            # Convert to PIL and save
+            Image.fromarray((image0.numpy() * 255).astype(np.uint8)).save(image0_path)
+            Image.fromarray((image1.numpy() * 255).astype(np.uint8)).save(image1_path)
+
+            # Camera 0: fx=100, cy=40, translation=[1,2,3]
+            camera0_to_world = torch.tensor(
+                [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 2.0], [0.0, 0.0, 1.0, 3.0], [0.0, 0.0, 0.0, 1.0]]
+            )
+
+            # Camera 1: fx=150, cy=30, translation=[4,5,6]
+            camera1_to_world = torch.tensor(
+                [[1.0, 0.0, 0.0, 4.0], [0.0, 1.0, 0.0, 5.0], [0.0, 0.0, 1.0, 6.0], [0.0, 0.0, 0.0, 1.0]]
+            )
+
+            dummy_cameras = Cameras(
+                fx=torch.tensor([100.0, 150.0]),
+                fy=torch.tensor([100.0, 150.0]),
+                cx=torch.tensor([60.0, 50.0]),
+                cy=torch.tensor([40.0, 30.0]),
+                width=torch.tensor([120, 100]),
+                height=torch.tensor([80, 60]),
+                camera_to_worlds=torch.stack([camera0_to_world[:3, :], camera1_to_world[:3, :]]),
+            )
+
+            print("=== INITIAL CAMERA SETUP ===")
+            print(f"dummy_cameras shape: {dummy_cameras.shape}")
+            print(f"Camera 0 translation: {dummy_cameras.camera_to_worlds[0, :, 3]}")
+            print(f"Camera 1 translation: {dummy_cameras.camera_to_worlds[1, :, 3]}")
+
+            # Create proper DataparserOutputs
+            dataparser_outputs = DataparserOutputs(
+                image_filenames=[image0_path, image1_path],
+                cameras=dummy_cameras,
+                scene_box=SceneBox(aabb=torch.tensor([[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]])),
+                dataparser_scale=1.0,
+            )
+
+            # Create dataset
+            dataset = InputDataset(dataparser_outputs)
+
+            # Create mock dataparser config
+            mock_dataparser_config = NerfstudioDataParserConfig(data=Path(temp_dir))
+
+            # Create minimal datamanagers by bypassing the full initialization
+            # Test 1: No tiling (tile_size_max = 0)
+            config_no_tiling = FullImageDatamanagerConfig(
+                dataparser=mock_dataparser_config,
+                tile_size_max=0,  # No tiling
+                cache_images="cpu",
+            )
+
+            # Create datamanager instance without full initialization
+            datamanager_no_tiling = FullImageDatamanager.__new__(FullImageDatamanager)
+            datamanager_no_tiling.config = config_no_tiling
+            datamanager_no_tiling.device = "cpu"
+            datamanager_no_tiling.world_size = 1
+            datamanager_no_tiling.local_rank = 0
+            datamanager_no_tiling.test_mode = "test"
+            datamanager_no_tiling.test_split = "test"
+            datamanager_no_tiling.tile_to_original_mapping = None
+
+            # Manually set up the datasets and cameras
+            datamanager_no_tiling.train_dataset = dataset
+            datamanager_no_tiling.eval_dataset = dataset
+            datamanager_no_tiling.train_cameras = dummy_cameras
+            datamanager_no_tiling.eval_cameras = dummy_cameras
+
+            # Test 2: Tiling path but no actual tiling (tile_size_max > image size)
+            config_with_tiling = FullImageDatamanagerConfig(
+                dataparser=mock_dataparser_config,
+                tile_size_max=200,  # Larger than both images, so no actual tiling
+                cache_images="cpu",
+            )
+
+            # Create second datamanager instance
+            datamanager_with_tiling = FullImageDatamanager.__new__(FullImageDatamanager)
+            datamanager_with_tiling.config = config_with_tiling
+            datamanager_with_tiling.device = "cpu"
+            datamanager_with_tiling.world_size = 1
+            datamanager_with_tiling.local_rank = 0
+            datamanager_with_tiling.test_mode = "test"
+            datamanager_with_tiling.test_split = "test"
+            datamanager_with_tiling.tile_to_original_mapping = None
+
+            # Set up initial cameras and dataset for tiling
+            datamanager_with_tiling.train_dataset = dataset
+            datamanager_with_tiling.eval_dataset = dataset
+            datamanager_with_tiling.train_cameras = dummy_cameras
+            datamanager_with_tiling.eval_cameras = dummy_cameras
+
+            print("\\n=== BEFORE TILING ===")
+            print(f"datamanager_with_tiling.train_cameras shape: {datamanager_with_tiling.train_cameras.shape}")
+            print(f"Camera 0 translation: {datamanager_with_tiling.train_cameras.camera_to_worlds[0, :, 3]}")
+            print(f"Camera 1 translation: {datamanager_with_tiling.train_cameras.camera_to_worlds[1, :, 3]}")
+
+            # Apply tiling to the second datamanager
+            tiled_images = datamanager_with_tiling._apply_tiling_to_images(
+                [{"image": image0, "image_idx": 0}, {"image": image1, "image_idx": 1}], "train"
+            )
+
+            print("\\n=== AFTER TILING ===")
+            print(f"datamanager_with_tiling.train_cameras shape: {datamanager_with_tiling.train_cameras.shape}")
+            print(f"Camera 0 translation: {datamanager_with_tiling.train_cameras.camera_to_worlds[0, :, 3]}")
+            print(f"Camera 1 translation: {datamanager_with_tiling.train_cameras.camera_to_worlds[1, :, 3]}")
+
+            # Set up tiled dataset
+            datamanager_with_tiling.train_dataset = type(
+                "MockDataset",
+                (),
+                {"__getitem__": lambda self, idx: tiled_images[idx], "__len__": lambda self: len(tiled_images)},
+            )()
+
+            print(f"No tiling - train_cameras shape: {datamanager_no_tiling.train_cameras.shape}")
+            print(f"With tiling - train_cameras shape: {datamanager_with_tiling.train_cameras.shape}")
+
+            # Test exactly how splatfacto training accesses the datamanager
+            results_no_tiling = []
+            results_with_tiling = []
+
+            # Simulate training loop - get each camera/image pair
+            for i in range(2):  # We have 2 cameras
+                # Access exactly like splatfacto training does: camera = self.train_cameras[image_idx : image_idx + 1]
+                camera_no_tiling = datamanager_no_tiling.train_cameras[i : i + 1]
+                camera_with_tiling = datamanager_with_tiling.train_cameras[i : i + 1]
+
+                # Get image data like splatfacto does
+                data_no_tiling = datamanager_no_tiling.train_dataset[i]
+                data_with_tiling = datamanager_with_tiling.train_dataset[i]
+
+                print(f"\n=== Camera {i} ===")
+                print(f"No tiling - camera shape: {camera_no_tiling.shape}")
+                print(f"With tiling - camera shape: {camera_with_tiling.shape}")
+
+                # Both should pass splatfacto's assertion
+                assert camera_no_tiling.shape[0] == 1, f"No tiling camera {i} should have shape[0]==1"
+                assert camera_with_tiling.shape[0] == 1, f"With tiling camera {i} should have shape[0]==1"
+
+                # Extract parameters for comparison
+                no_tiling_result = {
+                    "fx": camera_no_tiling.fx.item(),
+                    "fy": camera_no_tiling.fy.item(),
+                    "cx": camera_no_tiling.cx.item(),
+                    "cy": camera_no_tiling.cy.item(),
+                    "width": camera_no_tiling.width.item(),
+                    "height": camera_no_tiling.height.item(),
+                    "translation": camera_no_tiling.camera_to_worlds[0, :, 3].tolist(),
+                    "image_mean": data_no_tiling["image"].mean().item(),
+                    "image_shape": list(data_no_tiling["image"].shape),
+                }
+
+                with_tiling_result = {
+                    "fx": camera_with_tiling.fx.item(),
+                    "fy": camera_with_tiling.fy.item(),
+                    "cx": camera_with_tiling.cx.item(),
+                    "cy": camera_with_tiling.cy.item(),
+                    "width": camera_with_tiling.width.item(),
+                    "height": camera_with_tiling.height.item(),
+                    "translation": camera_with_tiling.camera_to_worlds[0, :, 3].tolist(),
+                    "image_mean": data_with_tiling["image"].mean().item(),
+                    "image_shape": list(data_with_tiling["image"].shape),
+                }
+
+                print(f"No tiling result: {no_tiling_result}")
+                print(f"With tiling result: {with_tiling_result}")
+
+                results_no_tiling.append(no_tiling_result)
+                results_with_tiling.append(with_tiling_result)
+
+                # Compare all parameters - they should be identical
+                assert (
+                    abs(no_tiling_result["fx"] - with_tiling_result["fx"]) < 1e-6
+                ), f"Camera {i} fx differs: {no_tiling_result['fx']} vs {with_tiling_result['fx']}"
+                assert (
+                    abs(no_tiling_result["fy"] - with_tiling_result["fy"]) < 1e-6
+                ), f"Camera {i} fy differs: {no_tiling_result['fy']} vs {with_tiling_result['fy']}"
+                assert (
+                    abs(no_tiling_result["cx"] - with_tiling_result["cx"]) < 1e-6
+                ), f"Camera {i} cx differs: {no_tiling_result['cx']} vs {with_tiling_result['cx']}"
+                assert (
+                    abs(no_tiling_result["cy"] - with_tiling_result["cy"]) < 1e-6
+                ), f"Camera {i} cy differs: {no_tiling_result['cy']} vs {with_tiling_result['cy']}"
+                assert (
+                    no_tiling_result["width"] == with_tiling_result["width"]
+                ), f"Camera {i} width differs: {no_tiling_result['width']} vs {with_tiling_result['width']}"
+                assert (
+                    no_tiling_result["height"] == with_tiling_result["height"]
+                ), f"Camera {i} height differs: {no_tiling_result['height']} vs {with_tiling_result['height']}"
+
+                # Compare extrinsics (translation)
+                for j in range(3):
+                    assert (
+                        abs(no_tiling_result["translation"][j] - with_tiling_result["translation"][j]) < 1e-6
+                    ), f"Camera {i} translation[{j}] differs: {no_tiling_result['translation'][j]} vs {with_tiling_result['translation'][j]}"
+
+                # Compare image data
+                assert (
+                    abs(no_tiling_result["image_mean"] - with_tiling_result["image_mean"]) < 1e-6
+                ), f"Camera {i} image data differs: {no_tiling_result['image_mean']} vs {with_tiling_result['image_mean']}"
+                assert (
+                    no_tiling_result["image_shape"] == with_tiling_result["image_shape"]
+                ), f"Camera {i} image shape differs: {no_tiling_result['image_shape']} vs {with_tiling_result['image_shape']}"
+
+            # Verify we got different cameras (not the same camera twice)
+            assert (
+                results_no_tiling[0]["fx"] != results_no_tiling[1]["fx"]
+            ), "Should have different cameras with different fx"
+            assert (
+                results_no_tiling[0]["translation"] != results_no_tiling[1]["translation"]
+            ), "Should have different camera positions"
+            assert (
+                results_no_tiling[0]["image_mean"] != results_no_tiling[1]["image_mean"]
+            ), "Should have different image colors"
+
+            # Verify tiling path gives same results as no-tiling path
+            for i in range(2):
+                for key in results_no_tiling[i]:
+                    if isinstance(results_no_tiling[i][key], list):
+                        for j, (val1, val2) in enumerate(zip(results_no_tiling[i][key], results_with_tiling[i][key])):
+                            assert abs(val1 - val2) < 1e-6, f"Camera {i} {key}[{j}] differs: {val1} vs {val2}"
+                    else:
+                        assert (
+                            abs(results_no_tiling[i][key] - results_with_tiling[i][key]) < 1e-6
+                        ), f"Camera {i} {key} differs: {results_no_tiling[i][key]} vs {results_with_tiling[i][key]}"
+
+            print("\n✅ SUCCESS: Tiling path preserves all camera parameters and image data correctly!")
+
+    def test_splatfacto_assertion_with_tiled_cameras(self):
+        """Test that verifies splatfacto's assertion behavior with tiled cameras"""
+        # Create a single camera (should work)
+        single_camera = Cameras(
+            fx=torch.tensor([100.0]),
+            fy=torch.tensor([100.0]),
+            cx=torch.tensor([32.0]),
+            cy=torch.tensor([20.0]),
+            width=torch.tensor([64]),
+            height=torch.tensor([40]),
+            camera_to_worlds=torch.eye(4).unsqueeze(0)[:, :3, :],
+        )
+
+        # Create multiple cameras (should fail splatfacto assertion)
+        multi_cameras = Cameras(
+            fx=torch.tensor([100.0, 100.0, 100.0]),
+            fy=torch.tensor([100.0, 100.0, 100.0]),
+            cx=torch.tensor([32.0, 32.0, 32.0]),
+            cy=torch.tensor([20.0, 20.0, 20.0]),
+            width=torch.tensor([64, 64, 64]),
+            height=torch.tensor([40, 40, 40]),
+            camera_to_worlds=torch.eye(4).unsqueeze(0)[:, :3, :].repeat(3, 1, 1),
+            camera_type=torch.tensor([[1], [1], [1]]),
+        )
+
+        print(f"Single camera shape: {single_camera.shape}")
+        print(f"Multi cameras shape: {multi_cameras.shape}")
+
+        # Test the assertion that splatfacto uses
+        assert single_camera.shape[0] == 1, "Single camera should pass"
+
+        # This should fail (like splatfacto would fail)
+        try:
+            assert multi_cameras.shape[0] == 1, "Only one camera at a time"
+            assert False, "Should have failed assertion"
+        except AssertionError as e:
+            print(f"Expected assertion failure: {e}")
+
+        # But indexed access should work
+        indexed_camera = multi_cameras[0:1]
+        assert indexed_camera.shape[0] == 1, "Indexed camera should pass"
+
+    def test_camera_indexing_after_concatenation(self):
+        """Test that camera indexing works correctly after concatenation"""
+        # Create 3 cameras with different extrinsics
+        cameras_data = []
+        for i in range(3):
+            camera_to_worlds = torch.tensor(
+                [[[1.0, 0.0, 0.0, float(i + 1)], [0.0, 1.0, 0.0, float(i + 2)], [0.0, 0.0, 1.0, float(i + 3)]]]
+            )  # Shape: [1, 3, 4]
+            camera = Cameras(
+                fx=torch.tensor([100.0]),
+                fy=torch.tensor([100.0]),
+                cx=torch.tensor([32.0]),
+                cy=torch.tensor([20.0]),
+                width=torch.tensor([64]),
+                height=torch.tensor([40]),
+                camera_to_worlds=camera_to_worlds,
+            )
+            cameras_data.append(camera)
+
+        # Concatenate like tiling does
+        tiled_cameras = Cameras(
+            fx=torch.cat([cam.fx for cam in cameras_data]),
+            fy=torch.cat([cam.fy for cam in cameras_data]),
+            cx=torch.cat([cam.cx for cam in cameras_data]),
+            cy=torch.cat([cam.cy for cam in cameras_data]),
+            width=torch.cat([cam.width for cam in cameras_data]),
+            height=torch.cat([cam.height for cam in cameras_data]),
+            camera_to_worlds=torch.cat([cam.camera_to_worlds for cam in cameras_data]),
+            camera_type=torch.cat([cam.camera_type for cam in cameras_data]),
+        )
+
+        print(f"Concatenated cameras shape: {tiled_cameras.shape}")
+
+        # Test indexing like datamanager does: camera = self.train_cameras[image_idx : image_idx + 1]
+        for i in range(3):
+            indexed_camera = tiled_cameras[i : i + 1]
+            print(f"Indexed camera {i} shape: {indexed_camera.shape}")
+            print(f"Indexed camera {i} translation: {indexed_camera.camera_to_worlds[0, :, 3]}")
+
+            # This should pass splatfacto's assertion
+            assert indexed_camera.shape[0] == 1, f"Indexed camera {i} should have shape[0] == 1"
+
+            # Verify correct extrinsics
+            expected_translation = torch.tensor([float(i + 1), float(i + 2), float(i + 3)])
+            actual_translation = indexed_camera.camera_to_worlds[0, :, 3]
+            assert torch.allclose(actual_translation, expected_translation), f"Camera {i} has wrong extrinsics"
+
+    def test_splatfacto_camera_batch_size_requirement(self):
+        """Test that demonstrates the splatfacto camera batch size issue"""
+        # Create multiple cameras like tiling would produce
+        cameras_data = []
+        for i in range(3):
+            camera = Cameras(
+                fx=torch.tensor([100.0]),
+                fy=torch.tensor([100.0]),
+                cx=torch.tensor([32.0]),
+                cy=torch.tensor([20.0]),
+                width=torch.tensor([64]),
+                height=torch.tensor([40]),
+                camera_to_worlds=torch.eye(4).unsqueeze(0)[:, :3, :],
+            )
+            cameras_data.append(camera)
+
+        # Concatenate like tiling does
+        tiled_cameras = Cameras(
+            fx=torch.cat([cam.fx for cam in cameras_data]),
+            fy=torch.cat([cam.fy for cam in cameras_data]),
+            cx=torch.cat([cam.cx for cam in cameras_data]),
+            cy=torch.cat([cam.cy for cam in cameras_data]),
+            width=torch.cat([cam.width for cam in cameras_data]),
+            height=torch.cat([cam.height for cam in cameras_data]),
+            camera_to_worlds=torch.cat([cam.camera_to_worlds for cam in cameras_data]),
+            camera_type=torch.cat([cam.camera_type for cam in cameras_data]),
+        )
+
+        print(f"Individual camera shape: {cameras_data[0].shape}")
+        print(f"Tiled cameras shape: {tiled_cameras.shape}")
+
+        # This is what splatfacto checks during training
+        print(f"tiled_cameras.shape[0]: {tiled_cameras.shape[0]}")
+
+        # Splatfacto expects shape[0] == 1, but tiling creates shape[0] == 3
+        assert tiled_cameras.shape[0] == 3, "Tiling creates batch of 3 cameras"
+
+        # This would fail splatfacto's assertion: assert camera.shape[0] == 1
+        # The bug is that all 3 cameras get passed to splatfacto at once!
+
+    def test_camera_to_worlds_concatenation_dimensions(self):
+        """Test that camera_to_worlds tensors have correct dimensions during concatenation"""
+        # Create 3 cameras with different extrinsics
+        cameras_data = []
+        for i in range(3):
+            camera_to_worlds = torch.tensor(
+                [[[1.0, 0.0, 0.0, float(i + 1)], [0.0, 1.0, 0.0, float(i + 2)], [0.0, 0.0, 1.0, float(i + 3)]]]
+            )  # Shape: [1, 3, 4]
+            camera = Cameras(
+                fx=torch.tensor([100.0]),
+                fy=torch.tensor([100.0]),
+                cx=torch.tensor([32.0]),
+                cy=torch.tensor([20.0]),
+                width=torch.tensor([64]),
+                height=torch.tensor([40]),
+                camera_to_worlds=camera_to_worlds,
+            )
+            cameras_data.append(camera)
+
+        # Check individual camera dimensions
+        for i, cam in enumerate(cameras_data):
+            print(f"Camera {i} camera_to_worlds shape: {cam.camera_to_worlds.shape}")
+            print(f"Camera {i} camera_to_worlds: {cam.camera_to_worlds}")
+
+        # Test concatenation like in the tiling code
+        concatenated = torch.cat([cam.camera_to_worlds for cam in cameras_data])
+        print(f"Concatenated camera_to_worlds shape: {concatenated.shape}")
+        print(f"Concatenated camera_to_worlds: {concatenated}")
+
+        # Expected: [3, 3, 4] - 3 cameras, each with 3x4 transform matrix
+        assert concatenated.shape == (3, 3, 4), f"Wrong concatenated shape: {concatenated.shape}"
+
+        # Verify each camera's extrinsics are preserved
+        for i in range(3):
+            expected_translation = torch.tensor([float(i + 1), float(i + 2), float(i + 3)])
+            actual_translation = concatenated[i, :, 3]
+            assert torch.allclose(
+                actual_translation, expected_translation
+            ), f"Camera {i} translation wrong: {actual_translation} != {expected_translation}"
+
+    def test_camera_extrinsics_with_tiling(self):
+        """Test that camera extrinsics are preserved when actual tiling occurs"""
+        # Create camera with unique extrinsics
+        camera_to_worlds = torch.tensor(
+            [[[1.0, 0.0, 0.0, 10.0], [0.0, 1.0, 0.0, 20.0], [0.0, 0.0, 1.0, 30.0]]]
+        )  # Translation [10,20,30]
+
+        original_camera = Cameras(
+            fx=torch.tensor([100.0]),
+            fy=torch.tensor([100.0]),
+            cx=torch.tensor([64.0]),
+            cy=torch.tensor([40.0]),
+            width=torch.tensor([128]),
+            height=torch.tensor([80]),
+            camera_to_worlds=camera_to_worlds,
+        )
+
+        datamanager = FullImageDatamanager.__new__(FullImageDatamanager)
+        tile_widths, tile_heights = [64, 64], [40, 40]  # 2x2 tiling = 4 tiles
+
+        # Create tiles from this camera
+        tile_cameras = datamanager._replicate_cameras_for_tiles(original_camera, tile_widths, tile_heights)
+
+        # All 4 tiles should have the SAME extrinsics as the original camera
+        expected_translation = torch.tensor([10.0, 20.0, 30.0])
+
+        for i, tile_camera in enumerate(tile_cameras):
+            # Handle different tensor shapes
+            if tile_camera.camera_to_worlds.dim() == 3:
+                tile_translation = tile_camera.camera_to_worlds[0, :, 3]
+            else:
+                tile_translation = tile_camera.camera_to_worlds[:, 3]
+            assert torch.allclose(
+                tile_translation, expected_translation
+            ), f"Tile {i} has wrong extrinsics: {tile_translation} != {expected_translation}"
+
+    def test_camera_extrinsics_preservation(self):
+        """Test that camera extrinsics (camera_to_worlds) are preserved correctly during tiling"""
+        # Create 2 cameras with different extrinsics
+        camera_to_worlds_1 = torch.tensor(
+            [[[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 2.0], [0.0, 0.0, 1.0, 3.0]]]
+        )  # Translation [1,2,3]
+
+        camera_to_worlds_2 = torch.tensor(
+            [[[1.0, 0.0, 0.0, 4.0], [0.0, 1.0, 0.0, 5.0], [0.0, 0.0, 1.0, 6.0]]]
+        )  # Translation [4,5,6]
+
+        # Stack into multi-camera object
+        original_cameras = Cameras(
+            fx=torch.tensor([100.0, 100.0]),
+            fy=torch.tensor([100.0, 100.0]),
+            cx=torch.tensor([32.0, 32.0]),
+            cy=torch.tensor([20.0, 20.0]),
+            width=torch.tensor([64, 64]),
+            height=torch.tensor([40, 40]),
+            camera_to_worlds=torch.cat([camera_to_worlds_1, camera_to_worlds_2]),
+        )
+
+        # Create mock images
+        images = [
+            {"image": torch.zeros(40, 64, 3)},
+            {"image": torch.ones(40, 64, 3)},
+        ]
+
+        # Mock datamanager with no tiling (tile_size_max > image size)
+        datamanager = FullImageDatamanager.__new__(FullImageDatamanager)
+        datamanager.config = type(
+            "Config",
+            (),
+            {
+                "tile_size_max": 128,  # Larger than 64x40, so no tiling
+                "tile_alignment": 1,
+            },
+        )()
+
+        # Process through tiling pipeline
+        tiled_images = []
+        tiled_cameras_list = []
+        tile_mapping = []
+
+        for img_idx, image_data in enumerate(images):
+            image = image_data["image"]
+            height, width = image.shape[:2]
+
+            tile_widths, tile_heights = datamanager._calculate_balanced_tile_sizes(
+                width, height, datamanager.config.tile_size_max, datamanager.config.tile_alignment
+            )
+
+            # Should not tile (single tile)
+            if len(tile_widths) == 1 and len(tile_heights) == 1:
+                tiled_images.append(image_data)
+                tiled_cameras_list.append(original_cameras[img_idx])
+                tile_mapping.append(img_idx)
+                continue
+
+        # Verify each camera maintains its unique extrinsics
+        assert len(tiled_cameras_list) == 2, f"Expected 2 cameras, got {len(tiled_cameras_list)}"
+
+        # Check camera 0 extrinsics [1,2,3]
+        cam0_translation = tiled_cameras_list[0].camera_to_worlds[:, 3]  # Shape: [3]
+        expected_translation_0 = torch.tensor([1.0, 2.0, 3.0])
+        assert torch.allclose(
+            cam0_translation, expected_translation_0
+        ), f"Camera 0 translation wrong: {cam0_translation} != {expected_translation_0}"
+
+        # Check camera 1 extrinsics [4,5,6]
+        cam1_translation = tiled_cameras_list[1].camera_to_worlds[:, 3]  # Shape: [3]
+        expected_translation_1 = torch.tensor([4.0, 5.0, 6.0])
+        assert torch.allclose(
+            cam1_translation, expected_translation_1
+        ), f"Camera 1 translation wrong: {cam1_translation} != {expected_translation_1}"
+
+        # Verify cameras are different
+        assert not torch.allclose(cam0_translation, cam1_translation), "Cameras should have different extrinsics!"
+
+    def test_multi_image_tiling_correspondence(self):
+        """Test that multiple images maintain correct camera correspondence after tiling"""
+        # Create 3 test images with unique identifiers
+        images = []
+        for img_id in range(3):
+            test_image = torch.full((40, 64, 3), float(img_id + 1))  # Each image filled with unique value
+            images.append({"image": test_image})
+
+        # Create 3 test cameras with unique cx values for identification
+        cameras_list = []
+        for img_id in range(3):
+            camera = Cameras(
+                fx=torch.tensor([100.0]),
+                fy=torch.tensor([100.0]),
+                cx=torch.tensor([float(img_id * 10 + 50)]),  # Unique cx: 50, 60, 70
+                cy=torch.tensor([20.0]),
+                width=torch.tensor([64]),
+                height=torch.tensor([40]),
+                camera_to_worlds=torch.eye(4).unsqueeze(0)[:, :3, :],
+            )
+            cameras_list.append(camera)
+
+        # Stack cameras into single Cameras object
+        original_cameras = Cameras(
+            fx=torch.cat([cam.fx for cam in cameras_list]),
+            fy=torch.cat([cam.fy for cam in cameras_list]),
+            cx=torch.cat([cam.cx for cam in cameras_list]),
+            cy=torch.cat([cam.cy for cam in cameras_list]),
+            width=torch.cat([cam.width for cam in cameras_list]),
+            height=torch.cat([cam.height for cam in cameras_list]),
+            camera_to_worlds=torch.cat([cam.camera_to_worlds for cam in cameras_list]),
+            camera_type=torch.cat([cam.camera_type for cam in cameras_list]),
+        )
+
+        # Mock datamanager with tiling that forces 2x1 tiling (2 tiles per image)
+        datamanager = FullImageDatamanager.__new__(FullImageDatamanager)
+        datamanager.config = type(
+            "Config",
+            (),
+            {
+                "tile_size_max": 32,  # Force tiling
+                "tile_alignment": 1,
+            },
+        )()
+
+        # Mock the tile size calculation to return 2x1 tiling
+        def mock_calculate_balanced_tile_sizes(width, height, tile_size_max, tile_alignment):
+            return [32, 32], [40]  # 2 tiles horizontally, 1 vertically
+
+        datamanager._calculate_balanced_tile_sizes = mock_calculate_balanced_tile_sizes
+
+        # Process images through tiling pipeline
+        tiled_images = []
+        tiled_cameras_list = []
+        tile_mapping = []
+
+        for img_idx, image_data in enumerate(images):
+            image = image_data["image"]
+            height, width = image.shape[:2]
+
+            tile_widths, tile_heights = datamanager._calculate_balanced_tile_sizes(
+                width, height, datamanager.config.tile_size_max, datamanager.config.tile_alignment
+            )
+
+            # Should tile into 2 pieces
+            if len(tile_widths) == 1 and len(tile_heights) == 1:
+                # No tiling
+                tiled_images.append(image_data)
+                tiled_cameras_list.append(original_cameras[img_idx])
+                tile_mapping.append(img_idx)
+            else:
+                # Tile the image
+                image_tiles = datamanager._tile_undistorted_image(image, tile_widths, tile_heights)
+
+                # Create cameras for each tile
+                original_camera = original_cameras[img_idx].reshape(())
+                tile_cameras = datamanager._replicate_cameras_for_tiles(
+                    original_camera, tile_widths, tile_heights, img_idx
+                )
+
+                # Add each tile
+                for tile_idx, (tile_image, tile_camera) in enumerate(zip(image_tiles, tile_cameras)):
+                    tile_data = image_data.copy()
+                    tile_data["image"] = tile_image
+
+                    tiled_images.append(tile_data)
+                    tiled_cameras_list.append(tile_camera)
+                    tile_mapping.append(img_idx)
+
+        # Verify correspondence: each tiled image should match its camera's parent
+        expected_sequence = [
+            (1.0, 50.0, 0),  # Image 0, tile 0: value=1.0, original_cx=50, parent=0
+            (1.0, 50.0, 0),  # Image 0, tile 1: value=1.0, original_cx=50, parent=0
+            (2.0, 60.0, 1),  # Image 1, tile 0: value=2.0, original_cx=60, parent=1
+            (2.0, 60.0, 1),  # Image 1, tile 1: value=2.0, original_cx=60, parent=1
+            (3.0, 70.0, 2),  # Image 2, tile 0: value=3.0, original_cx=70, parent=2
+            (3.0, 70.0, 2),  # Image 2, tile 1: value=3.0, original_cx=70, parent=2
+        ]
+
+        assert len(tiled_images) == 6, f"Expected 6 tiled images, got {len(tiled_images)}"
+        assert len(tiled_cameras_list) == 6, f"Expected 6 tiled cameras, got {len(tiled_cameras_list)}"
+
+        for i, (expected_value, expected_original_cx, expected_parent) in enumerate(expected_sequence):
+            # Check image content
+            tile_value = tiled_images[i]["image"][0, 0, 0].item()
+            assert tile_value == expected_value, f"Tile {i} has wrong image content: {tile_value} != {expected_value}"
+
+            # Check camera parent index
+            parent_idx = tiled_cameras_list[i].metadata["parent_camera_index"]
+            assert parent_idx == expected_parent, f"Tile {i} has wrong parent camera: {parent_idx} != {expected_parent}"
+
+            # Check tile mapping
+            assert (
+                tile_mapping[i] == expected_parent
+            ), f"Tile {i} has wrong mapping: {tile_mapping[i]} != {expected_parent}"
+
+    def test_tile_image_camera_correspondence(self):
+        """Test that tiled images and cameras maintain correct correspondence"""
+        # Create test image with unique pixel values for each tile region
+        test_image = torch.zeros(80, 128, 3)  # 80x128 RGB
+
+        # Fill each quadrant with unique values to identify tiles
+        test_image[0:40, 0:64, :] = 1.0  # Top-left = 1.0
+        test_image[0:40, 64:128, :] = 2.0  # Top-right = 2.0
+        test_image[40:80, 0:64, :] = 3.0  # Bottom-left = 3.0
+        test_image[40:80, 64:128, :] = 4.0  # Bottom-right = 4.0
+
+        # Create test camera with known principal point
+        cameras = Cameras(
+            fx=torch.tensor([100.0]),
+            fy=torch.tensor([100.0]),
+            cx=torch.tensor([64.0]),  # Center X
+            cy=torch.tensor([40.0]),  # Center Y
+            width=torch.tensor([128]),
+            height=torch.tensor([80]),
+            camera_to_worlds=torch.eye(4).unsqueeze(0)[:, :3, :],
+        )
+
+        datamanager = FullImageDatamanager.__new__(FullImageDatamanager)
+        tile_widths, tile_heights = [64, 64], [40, 40]  # 2x2 tiling
+
+        # Tile the image and cameras
+        image_tiles = datamanager._tile_undistorted_image(test_image, tile_widths, tile_heights)
+        tile_cameras = datamanager._replicate_cameras_for_tiles(cameras, tile_widths, tile_heights)
+
+        # Verify correspondence: each tile's unique value should match its camera's metadata
+        expected_correspondences = [
+            (1.0, 0, 0, 0, 0),  # Top-left: value=1.0, tile_row=0, tile_col=0, offset_x=0, offset_y=0
+            (2.0, 0, 1, 64, 0),  # Top-right: value=2.0, tile_row=0, tile_col=1, offset_x=64, offset_y=0
+            (3.0, 1, 0, 0, 40),  # Bottom-left: value=3.0, tile_row=1, tile_col=0, offset_x=0, offset_y=40
+            (4.0, 1, 1, 64, 40),  # Bottom-right: value=4.0, tile_row=1, tile_col=1, offset_x=64, offset_y=40
+        ]
+
+        for i, (expected_value, expected_row, expected_col, expected_offset_x, expected_offset_y) in enumerate(
+            expected_correspondences
+        ):
+            # Check image tile has expected unique value
+            tile_value = image_tiles[i][0, 0, 0].item()  # Get first pixel value
+            assert tile_value == expected_value, f"Tile {i} has wrong image content: {tile_value} != {expected_value}"
+
+            # Check camera metadata matches expected tile position
+            metadata = tile_cameras[i].metadata
+            assert (
+                metadata["tile_row"] == expected_row
+            ), f"Tile {i} camera has wrong row: {metadata['tile_row']} != {expected_row}"
+            assert (
+                metadata["tile_col"] == expected_col
+            ), f"Tile {i} camera has wrong col: {metadata['tile_col']} != {expected_col}"
+            assert (
+                metadata["tile_offset_x"] == expected_offset_x
+            ), f"Tile {i} camera has wrong offset_x: {metadata['tile_offset_x']} != {expected_offset_x}"
+            assert (
+                metadata["tile_offset_y"] == expected_offset_y
+            ), f"Tile {i} camera has wrong offset_y: {metadata['tile_offset_y']} != {expected_offset_y}"
+
+            # Verify camera intrinsics match the tile position
+            expected_cx = cameras.cx.item() - expected_offset_x
+            expected_cy = cameras.cy.item() - expected_offset_y
+            assert torch.allclose(tile_cameras[i].cx, torch.tensor([expected_cx])), f"Tile {i} camera cx mismatch"
+            assert torch.allclose(tile_cameras[i].cy, torch.tensor([expected_cy])), f"Tile {i} camera cy mismatch"
+
     def test_tile_to_original_mapping(self):
         """Test that tile_to_original_mapping correctly tracks which tiles came from which images"""
         # Test the concept: tile_mapping should track original image indices
