@@ -609,6 +609,72 @@ class TestTilingIntrinsics:
 
             print("\n✅ SUCCESS: Tiling path preserves all camera parameters and image data correctly!")
 
+    def test_actual_tiling_preserves_camera_extrinsics(self):
+        """Test that camera extrinsics are preserved correctly when actual tiling occurs."""
+        # Create test cameras with different extrinsics
+        camera0_to_world = torch.tensor(
+            [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 2.0], [0.0, 0.0, 1.0, 3.0], [0.0, 0.0, 0.0, 1.0]]
+        )
+
+        camera1_to_world = torch.tensor(
+            [[1.0, 0.0, 0.0, 4.0], [0.0, 1.0, 0.0, 5.0], [0.0, 0.0, 1.0, 6.0], [0.0, 0.0, 0.0, 1.0]]
+        )
+
+        dummy_cameras = Cameras(
+            fx=torch.tensor([100.0, 150.0]),
+            fy=torch.tensor([100.0, 150.0]),
+            cx=torch.tensor([64.0, 50.0]),
+            cy=torch.tensor([40.0, 30.0]),
+            width=torch.tensor([128, 100]),
+            height=torch.tensor([80, 60]),
+            camera_to_worlds=torch.stack([camera0_to_world[:3, :], camera1_to_world[:3, :]]),
+        )
+
+        # Create mock datamanager with tiling that forces actual tiling
+        datamanager = FullImageDatamanager.__new__(FullImageDatamanager)
+        datamanager.config = type("Config", (), {"tile_size_max": 64, "tile_alignment": 16})()
+        datamanager.train_cameras = dummy_cameras
+
+        # Create test images that will be tiled (128x80 and 100x60 with tile_size_max=64)
+        image0 = torch.rand(80, 128, 3)  # Will be tiled into 4 tiles (2x2)
+        image1 = torch.rand(60, 100, 3)  # Will be tiled into 2 tiles (2x1)
+
+        # Apply tiling
+        tiled_images = datamanager._apply_tiling_to_images(
+            [{"image": image0, "image_idx": 0}, {"image": image1, "image_idx": 1}], "train"
+        )
+
+        # Verify correct number of tiles
+        assert len(tiled_images) == 6, f"Expected 6 tiled images (4+2), got {len(tiled_images)}"
+        assert (
+            datamanager.train_cameras.shape[0] == 6
+        ), f"Expected 6 tiled cameras, got {datamanager.train_cameras.shape[0]}"
+
+        # Verify camera extrinsics are preserved correctly
+        expected_translations = [
+            torch.tensor([1.0, 2.0, 3.0]),  # From camera 0 (4 tiles)
+            torch.tensor([1.0, 2.0, 3.0]),
+            torch.tensor([1.0, 2.0, 3.0]),
+            torch.tensor([1.0, 2.0, 3.0]),
+            torch.tensor([4.0, 5.0, 6.0]),  # From camera 1 (2 tiles)
+            torch.tensor([4.0, 5.0, 6.0]),
+        ]
+
+        for i, expected_translation in enumerate(expected_translations):
+            actual_translation = datamanager.train_cameras.camera_to_worlds[i, :, 3]
+            assert torch.allclose(
+                actual_translation, expected_translation
+            ), f"Camera {i} translation mismatch: {actual_translation} != {expected_translation}"
+
+        # Verify tensor shapes are correct (not flattened)
+        assert datamanager.train_cameras.camera_to_worlds.shape == (
+            6,
+            3,
+            4,
+        ), f"Wrong camera_to_worlds shape: {datamanager.train_cameras.camera_to_worlds.shape}"
+
+        print("✅ SUCCESS: Actual tiling preserves camera extrinsics correctly!")
+
     def test_splatfacto_assertion_with_tiled_cameras(self):
         """Test that verifies splatfacto's assertion behavior with tiled cameras"""
         # Create a single camera (should work)
