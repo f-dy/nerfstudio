@@ -334,17 +334,18 @@ class TestTilingIntrinsics:
         assert len(tile_cameras) == 4, "Should create 4 cameras for 2x2 tiling"
 
         # Verify camera adjustments for each tile
-        # With Y-up coordinate system fix: cy_adjusted = cy - (height - tile_offset_y - tile_height)
-        # Original: cy=40.0, height=80
-        # Tile 0 (top-left): tile_offset_y=0, tile_height=40 → cy_adjusted = 40 - (80 - 0 - 40) = 0
-        # Tile 1 (top-right): tile_offset_y=0, tile_height=40 → cy_adjusted = 40 - (80 - 0 - 40) = 0
-        # Tile 2 (bottom-left): tile_offset_y=40, tile_height=40 → cy_adjusted = 40 - (80 - 40 - 40) = 40
-        # Tile 3 (bottom-right): tile_offset_y=40, tile_height=40 → cy_adjusted = 40 - (80 - 40 - 40) = 40
+        # Both cy and tile_offset_y are in Y-down coordinates (COLMAP standard)
+        # Simple subtraction: cy_adjusted = cy - tile_offset_y
+        # Original: cy=40.0
+        # Tile 0 (top-left): tile_offset_y=0 → cy_adjusted = 40 - 0 = 40
+        # Tile 1 (top-right): tile_offset_y=0 → cy_adjusted = 40 - 0 = 40
+        # Tile 2 (bottom-left): tile_offset_y=40 → cy_adjusted = 40 - 40 = 0
+        # Tile 3 (bottom-right): tile_offset_y=40 → cy_adjusted = 40 - 40 = 0
         expected_adjustments = [
-            (64.0, 0.0),  # Top-left: cx=64-0=64, cy=40-(80-0-40)=0
-            (0.0, 0.0),  # Top-right: cx=64-64=0, cy=40-(80-0-40)=0
-            (64.0, 40.0),  # Bottom-left: cx=64-0=64, cy=40-(80-40-40)=40
-            (0.0, 40.0),  # Bottom-right: cx=64-64=0, cy=40-(80-40-40)=40
+            (64.0, 40.0),  # Top-left: cx=64-0=64, cy=40-0=40
+            (0.0, 40.0),  # Top-right: cx=64-64=0, cy=40-0=40
+            (64.0, 0.0),  # Bottom-left: cx=64-0=64, cy=40-40=0
+            (0.0, 0.0),  # Bottom-right: cx=64-64=0, cy=40-40=0
         ]
 
         for i, (expected_cx, expected_cy) in enumerate(expected_adjustments):
