@@ -403,12 +403,20 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         # Merge with existing metadata
         new_metadata = cameras.metadata.copy() if cameras.metadata else {}
         new_metadata.update(tile_metadata)
+
+        # Coordinate system conversion for Y-axis:
+        # Our tiling uses Y-down coordinates (tile_offset_y=0 at top, increases downward)
+        # But nerfstudio cameras use Y-up coordinates (cy=0 at bottom, increases upward)
+        # Convert tile_offset_y from Y-down to Y-up coordinate system
+        original_height = cameras.height.item()
+        cy_adjusted = cameras.cy - (original_height - tile_offset_y - tile_height)
+
         # Create a new Cameras object with adjusted intrinsics
         adjusted_cameras = Cameras(
             fx=cameras.fx,
             fy=cameras.fy,
-            cx=cameras.cx - tile_offset_x,
-            cy=cameras.cy - tile_offset_y,
+            cx=cameras.cx - tile_offset_x,  # X-axis: both systems use +X = right
+            cy=cy_adjusted,  # Y-axis: converted from Y-down to Y-up coordinates
             width=torch.tensor([tile_width], device=cameras.width.device),
             height=torch.tensor([tile_height], device=cameras.height.device),
             camera_to_worlds=cameras.camera_to_worlds,

@@ -394,7 +394,12 @@ class SplatfactoModel(Model):
             return False
 
         # Always GC after SH degree increases (unique timing, not covered by gsplat)
-        if self.step % self.config.sh_degree_interval == 0 and self.step > 0:
+        # But stop once all SH degrees are activated (sh_degree_to_use reaches max)
+        if (
+            self.step % self.config.sh_degree_interval == 0
+            and self.step > 0
+            and self.step // self.config.sh_degree_interval <= self.config.sh_degree
+        ):
             return True
 
         # GC during stable period after densification stops (gsplat GC stops at stop_split_at)
