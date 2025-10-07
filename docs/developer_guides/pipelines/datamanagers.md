@@ -147,7 +147,7 @@ ns-train splatfacto --data {PROCESSED_DATA_DIR} \
 When tiling is enabled, the effective dataset size increases (e.g., 100 images → 400 tiles with 2×2 tiling). The `tile_scale_iterations` parameter automatically scales training parameters to maintain equivalent training:
 
 - **Trainer parameters**: `max_num_iterations`, `steps_per_eval_image`, `steps_per_save`, `steps_per_eval_all_images`
-- **Model parameters**: `warmup_length`, `refine_every`, `resolution_schedule`, `stop_split_at`, etc.
+- **Model parameters**: `warmup_length`, `refine_every`, `resolution_schedule`, `reset_alpha_every`, `sh_degree_interval`, `stop_screen_size_at`, `stop_split_at`
 - **Datamanager parameters**: `fps_reset_every`
 
 To disable automatic scaling:
