@@ -259,6 +259,13 @@ class Trainer:
             for param in scaled_params:
                 CONSOLE.log(f"  {param}")
 
+            # Update writer's max_iter to reflect scaled max_num_iterations
+            from nerfstudio.utils import writer
+
+            if hasattr(writer, "GLOBAL_BUFFER") and writer.GLOBAL_BUFFER is not None:
+                if hasattr(writer.GLOBAL_BUFFER, "max_iter"):
+                    writer.GLOBAL_BUFFER.max_iter = self.config.max_num_iterations
+
             # Apply model scaling
             self.pipeline._apply_model_scaling()
 
