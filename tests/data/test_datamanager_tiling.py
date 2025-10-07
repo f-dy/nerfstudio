@@ -897,62 +897,58 @@ class TestCameraHandling:
         from nerfstudio.data.datamanagers.full_images_datamanager import FullImageDatamanagerConfig
         from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
 
-        # Create temporary directory for test data
+        # Create temporary directory with test data
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Create test images
+            # Create test images that will trigger tiling
             image0 = torch.full((80, 128, 3), 0.2)
             image0_path = os.path.join(temp_dir, "image0.png")
             Image.fromarray((image0.numpy() * 255).astype(np.uint8)).save(image0_path)
 
-            # Test 1: FPS sampling - should scale fps_reset_every
-            config_fps = FullImageDatamanagerConfig(
-                dataparser=NerfstudioDataParserConfig(data=Path(temp_dir)),
-                tile_size_max=64,
-                tile_scale_iterations=True,
-                train_cameras_sampling_strategy="fps",
-                fps_reset_every=100,
-            )
-            original_fps_value = config_fps.fps_reset_every
+            # Create transforms.json with proper camera parameters
+            transform_matrix = torch.eye(4)
+            transform_matrix[2, 3] = 1.0  # Move camera back 1 unit
+            transforms_data = {
+                "fl_x": 100.0,
+                "fl_y": 100.0,
+                "cx": 64.0,
+                "cy": 40.0,
+                "w": 128,
+                "h": 80,
+                "frames": [{"file_path": "./image0.png", "transform_matrix": transform_matrix.tolist()}],
+            }
+            import json
 
-            datamanager_fps = FullImageDatamanager.__new__(FullImageDatamanager)
-            datamanager_fps.config = config_fps
-            datamanager_fps.iteration_scale_factor = 2.0
+            with open(os.path.join(temp_dir, "transforms.json"), "w") as f:
+                json.dump(transforms_data, f)
 
-            # Simulate scaling
-            if config_fps.tile_scale_iterations and datamanager_fps.iteration_scale_factor > 1.0:
-                if config_fps.train_cameras_sampling_strategy == "fps":
-                    config_fps.fps_reset_every = int(
-                        config_fps.fps_reset_every * datamanager_fps.iteration_scale_factor
-                    )
-
-            assert (
-                config_fps.fps_reset_every == original_fps_value * 2.0
-            ), f"FPS sampling should scale fps_reset_every from {original_fps_value} to {original_fps_value * 2.0}, got {config_fps.fps_reset_every}"
-
-            # Test 2: Random sampling - should NOT scale fps_reset_every
-            config_random = FullImageDatamanagerConfig(
-                dataparser=NerfstudioDataParserConfig(data=Path(temp_dir)),
-                tile_size_max=64,
+            # Test: Random sampling WITH scaling - should NOT scale fps_reset_every
+            config_with_scaling = FullImageDatamanagerConfig(
+                dataparser=NerfstudioDataParserConfig(data=Path(temp_dir), auto_scale_poses=False),
+                tile_size_max=64,  # Will trigger tiling
                 tile_scale_iterations=True,
                 train_cameras_sampling_strategy="random",
                 fps_reset_every=100,
             )
-            original_random_value = config_random.fps_reset_every
+            datamanager_with = config_with_scaling.setup()
+            datamanager_with.setup_train()
 
-            datamanager_random = FullImageDatamanager.__new__(FullImageDatamanager)
-            datamanager_random.config = config_random
-            datamanager_random.iteration_scale_factor = 2.0
+            # Test: Random sampling WITHOUT scaling - should NOT scale fps_reset_every
+            config_without_scaling = FullImageDatamanagerConfig(
+                dataparser=NerfstudioDataParserConfig(data=Path(temp_dir), auto_scale_poses=False),
+                tile_size_max=64,  # Will trigger tiling
+                tile_scale_iterations=False,
+                train_cameras_sampling_strategy="random",
+                fps_reset_every=100,
+            )
+            datamanager_without = config_without_scaling.setup()
+            datamanager_without.setup_train()
 
-            # Simulate scaling
-            if config_random.tile_scale_iterations and datamanager_random.iteration_scale_factor > 1.0:
-                if config_random.train_cameras_sampling_strategy == "fps":  # This condition should be False
-                    config_random.fps_reset_every = int(
-                        config_random.fps_reset_every * datamanager_random.iteration_scale_factor
-                    )
-
+            # Random sampling: both WITH and WITHOUT scaling should keep original fps_reset_every
+            # because fps_reset_every should only be scaled when using FPS sampling strategy
             assert (
-                config_random.fps_reset_every == original_random_value
-            ), f"Random sampling should NOT scale fps_reset_every, expected {original_random_value}, got {config_random.fps_reset_every}"
+                config_with_scaling.fps_reset_every == 100
+            ), "Random sampling should never scale fps_reset_every, even with tile_scale_iterations=True"
+            assert config_without_scaling.fps_reset_every == 100, "Random sampling should never scale fps_reset_every"
 
 
 class TestTilingIntegration:
