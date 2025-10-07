@@ -126,6 +126,7 @@ class Trainer:
         self.training_state: Literal["training", "paused", "completed"] = (
             "paused" if self.config.start_paused else "training"
         )
+        self._scaling_checked = False  # Track if we've checked for iteration scaling
         self.gradient_accumulation_steps: DefaultDict = defaultdict(lambda: 1)
         self.gradient_accumulation_steps.update(self.config.gradient_accumulation_steps)
 
@@ -255,12 +256,14 @@ class Trainer:
 
     def _check_and_apply_scaling(self):
         """Check if iteration scaling needs to be applied after datamanager setup."""
+        CONSOLE.log("DEBUG: In _check_and_apply_scaling")
         if (
             hasattr(self.pipeline.datamanager, "iteration_scale_factor")
             and hasattr(self.pipeline.datamanager, "_scaling_applied")
             and self.pipeline.datamanager._scaling_applied
             and self.pipeline.datamanager.iteration_scale_factor > 1.0
         ):
+            CONSOLE.log("DEBUG: All conditions met, applying scaling...")
             scale = self.pipeline.datamanager.iteration_scale_factor
             scaled_params = []
 
@@ -307,9 +310,6 @@ class Trainer:
     def train(self) -> None:
         """Train the model."""
         assert self.pipeline.datamanager.train_dataset is not None, "Missing DatsetInputs"
-
-        # Check for updated iteration scaling after datamanager has processed images
-        self._check_and_apply_scaling()
 
         if hasattr(self.pipeline.datamanager, "train_dataparser_outputs"):
             self.pipeline.datamanager.train_dataparser_outputs.save_dataparser_transform(  # type: ignore
@@ -578,6 +578,13 @@ class Trainer:
 
         with torch.autocast(device_type=cpu_or_cuda_str, enabled=self.mixed_precision):
             _, loss_dict, metrics_dict = self.pipeline.get_train_loss_dict(step=step)
+
+            # Check for iteration scaling after first batch (when images are actually loaded/tiled)
+            if not self._scaling_checked:
+                CONSOLE.log("DEBUG: Checking for iteration scaling after first batch...")
+                self._check_and_apply_scaling()
+                self._scaling_checked = True
+
             loss = functools.reduce(torch.add, loss_dict.values())
         self.grad_scaler.scale(loss).backward()  # type: ignore
         needs_step = [

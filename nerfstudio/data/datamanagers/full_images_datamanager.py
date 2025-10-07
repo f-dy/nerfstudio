@@ -207,6 +207,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             scaled_params.append(f"fps_reset_every: {old_val} → {new_val}")
 
         CONSOLE.log(f"Iteration scale factor: {self.iteration_scale_factor:.2f}")
+        CONSOLE.log("DEBUG: About to trigger pipeline scaling")
         if scaled_params:
             CONSOLE.log("Scaled datamanager parameters:")
             for param in scaled_params:
