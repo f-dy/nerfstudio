@@ -132,7 +132,6 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         local_rank: int = 0,
         **kwargs,
     ):
-        super().__init__()
         if config.cache_images == "disk":
             try:
                 torch.multiprocessing.set_start_method("spawn")
@@ -184,6 +183,9 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         # Some logic to make sure we sample every camera in equal amounts
         self.train_unseen_cameras = self.sample_train_cameras()
+        self.eval_unseen_cameras = [i for i in range(len(self.eval_dataset))]
+        assert len(self.train_unseen_cameras) > 0, "No data found in dataset"
+        super().__init__()
 
     def _apply_iteration_scaling(self):
         """Apply iteration scaling to all relevant parameters after tiling is computed."""
@@ -210,9 +212,6 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
     def _trigger_pipeline_scaling(self):
         """Mark that scaling needs to be applied to pipeline and trainer."""
         self._scaling_applied = True
-        self.eval_unseen_cameras = [i for i in range(len(self.eval_dataset))]
-        assert len(self.train_unseen_cameras) > 0, "No data found in dataset"
-        super().__init__()
 
     def sample_train_cameras(self):
         """Return a list of camera indices sampled using the strategy specified by
