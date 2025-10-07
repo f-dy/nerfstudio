@@ -189,16 +189,22 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
     def _apply_iteration_scaling(self):
         """Apply iteration scaling to all relevant parameters after tiling is computed."""
-        if not self.config.tile_scale_iterations or self.iteration_scale_factor <= 1.0:
+        if (
+            not getattr(self.config, "tile_scale_iterations", True)
+            or not hasattr(self, "iteration_scale_factor")
+            or self.iteration_scale_factor <= 1.0
+        ):
             return
 
         scaled_params = []
 
         # Only scale fps_reset_every if FPS sampling is used
-        if self.config.train_cameras_sampling_strategy == "fps":
-            old_val = self.config.fps_reset_every
-            self.config.fps_reset_every = int(old_val * self.iteration_scale_factor)
-            scaled_params.append(f"fps_reset_every: {old_val} → {self.config.fps_reset_every}")
+        if getattr(self.config, "train_cameras_sampling_strategy", "random") == "fps":
+            old_val = getattr(self.config, "fps_reset_every", 100)
+            new_val = int(old_val * self.iteration_scale_factor)
+            if hasattr(self.config, "fps_reset_every"):
+                self.config.fps_reset_every = new_val
+            scaled_params.append(f"fps_reset_every: {old_val} → {new_val}")
 
         CONSOLE.log(f"Iteration scale factor: {self.iteration_scale_factor:.2f}")
         if scaled_params:
