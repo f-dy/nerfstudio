@@ -173,6 +173,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         # Iteration scaling factor will be computed after tiling
         self._scaling_applied = False  # Flag to track if scaling has been applied
+        self.train_count = 0  # Track training iterations
 
         if len(self.train_dataset) > 500 and self.config.cache_images == "gpu":
             CONSOLE.print(
