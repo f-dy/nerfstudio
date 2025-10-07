@@ -132,6 +132,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         local_rank: int = 0,
         **kwargs,
     ):
+        super().__init__()
         if config.cache_images == "disk":
             try:
                 torch.multiprocessing.set_start_method("spawn")
