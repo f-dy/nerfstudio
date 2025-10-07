@@ -951,14 +951,6 @@ class TestCameraHandling:
             assert (
                 config_random.fps_reset_every == 100
             ), f"Random sampling should NOT scale fps_reset_every, got {config_random.fps_reset_every}"
-        """Test that eval images are not tiled and alignment constraints work properly"""
-        # This test was consolidated into other tests
-        pass
-
-    def test_eval_mode_and_alignment(self):
-        """Test that eval images are not tiled and alignment constraints work properly"""
-        # This test was consolidated into other tests
-        pass
 
 
 class TestTilingIntegration:
