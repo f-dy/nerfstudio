@@ -302,10 +302,14 @@ class VanillaPipeline(Pipeline):
                 old_val = self.model.config.sh_degree_interval
                 self.model.config.sh_degree_interval = int(old_val * scale)
                 scaled_params.append(f"sh_degree_interval: {old_val} → {self.model.config.sh_degree_interval}")
-            if hasattr(self.model.config, "stop_screen_size_at"):
-                old_val = self.model.config.stop_screen_size_at
-                self.model.config.stop_screen_size_at = int(old_val * scale)
-                scaled_params.append(f"stop_screen_size_at: {old_val} → {self.model.config.stop_screen_size_at}")
+
+            # Only scale screen size parameters for default strategy
+            if hasattr(self.model.config, "strategy") and self.model.config.strategy == "default":
+                if hasattr(self.model.config, "stop_screen_size_at"):
+                    old_val = self.model.config.stop_screen_size_at
+                    self.model.config.stop_screen_size_at = int(old_val * scale)
+                    scaled_params.append(f"stop_screen_size_at: {old_val} → {self.model.config.stop_screen_size_at}")
+
             if hasattr(self.model.config, "stop_split_at"):
                 old_val = self.model.config.stop_split_at
                 self.model.config.stop_split_at = int(old_val * scale)
@@ -314,7 +318,7 @@ class VanillaPipeline(Pipeline):
             if scaled_params:
                 from nerfstudio.utils.rich_utils import CONSOLE
 
-                CONSOLE.log("Scaled model config for tiling:")
+                CONSOLE.log("Scaled model parameters:")
                 for param in scaled_params:
                     CONSOLE.log(f"  {param}")
 

@@ -178,10 +178,21 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         # Scale datamanager parameters if tiling is enabled
         if self.config.tile_scale_iterations and self.iteration_scale_factor > 1.0:
-            self.config.fps_reset_every = int(self.config.fps_reset_every * self.iteration_scale_factor)
+            scaled_params = []
+
+            # Only scale fps_reset_every if FPS sampling is used
+            if self.config.train_cameras_sampling_strategy == "fps":
+                old_val = self.config.fps_reset_every
+                self.config.fps_reset_every = int(old_val * self.iteration_scale_factor)
+                scaled_params.append(f"fps_reset_every: {old_val} → {self.config.fps_reset_every}")
+
             CONSOLE.log(f"Tiling detected: {tiled_train_count} tiles from {original_train_count} images")
             CONSOLE.log(f"Iteration scale factor: {self.iteration_scale_factor:.2f}")
-            CONSOLE.log(f"Scaled fps_reset_every: {self.config.fps_reset_every}")
+
+            if scaled_params:
+                CONSOLE.log("Scaled datamanager parameters:")
+                for param in scaled_params:
+                    CONSOLE.log(f"  {param}")
 
         if len(self.train_dataset) > 500 and self.config.cache_images == "gpu":
             CONSOLE.print(

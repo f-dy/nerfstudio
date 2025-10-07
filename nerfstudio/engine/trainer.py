@@ -169,24 +169,31 @@ class Trainer:
             and self.pipeline.datamanager.iteration_scale_factor > 1.0
         ):
             scale = self.pipeline.datamanager.iteration_scale_factor
+            scaled_params = []
 
-            # Scale trainer config parameters
-            self.config.max_num_iterations = int(self.config.max_num_iterations * scale)
-            self.config.steps_per_eval_image = int(self.config.steps_per_eval_image * scale)
-            self.config.steps_per_save = int(self.config.steps_per_save * scale)
-            self.config.steps_per_eval_all_images = int(self.config.steps_per_eval_all_images * scale)
+            # Always scale max_num_iterations
+            old_val = self.config.max_num_iterations
+            self.config.max_num_iterations = int(old_val * scale)
+            scaled_params.append(f"max_num_iterations: {old_val} → {self.config.max_num_iterations}")
 
-            CONSOLE.log(f"Scaled trainer config for tiling (scale factor: {scale:.2f}):")
-            CONSOLE.log(
-                f"  max_num_iterations: {int(self.config.max_num_iterations / scale)} → {self.config.max_num_iterations}"
-            )
-            CONSOLE.log(
-                f"  steps_per_eval_image: {int(self.config.steps_per_eval_image / scale)} → {self.config.steps_per_eval_image}"
-            )
-            CONSOLE.log(f"  steps_per_save: {int(self.config.steps_per_save / scale)} → {self.config.steps_per_save}")
-            CONSOLE.log(
-                f"  steps_per_eval_all_images: {int(self.config.steps_per_eval_all_images / scale)} → {self.config.steps_per_eval_all_images}"
-            )
+            # Always scale steps_per_save
+            old_val = self.config.steps_per_save
+            self.config.steps_per_save = int(old_val * scale)
+            scaled_params.append(f"steps_per_save: {old_val} → {self.config.steps_per_save}")
+
+            # Only scale eval parameters if not in inference mode
+            if test_mode != "inference":
+                old_val = self.config.steps_per_eval_image
+                self.config.steps_per_eval_image = int(old_val * scale)
+                scaled_params.append(f"steps_per_eval_image: {old_val} → {self.config.steps_per_eval_image}")
+
+                old_val = self.config.steps_per_eval_all_images
+                self.config.steps_per_eval_all_images = int(old_val * scale)
+                scaled_params.append(f"steps_per_eval_all_images: {old_val} → {self.config.steps_per_eval_all_images}")
+
+            CONSOLE.log(f"Scaled trainer parameters (scale factor: {scale:.2f}):")
+            for param in scaled_params:
+                CONSOLE.log(f"  {param}")
 
         self.optimizers = self.setup_optimizers()
 
