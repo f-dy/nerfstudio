@@ -164,38 +164,6 @@ class Trainer:
             grad_scaler=self.grad_scaler,
         )
 
-        # Apply iteration scaling to trainer config if tiling is enabled
-        if (
-            hasattr(self.pipeline.datamanager, "iteration_scale_factor")
-            and self.pipeline.datamanager.iteration_scale_factor > 1.0
-        ):
-            scale = self.pipeline.datamanager.iteration_scale_factor
-            scaled_params = []
-
-            # Always scale max_num_iterations
-            old_val = self.config.max_num_iterations
-            self.config.max_num_iterations = int(old_val * scale)
-            scaled_params.append(f"max_num_iterations: {old_val} → {self.config.max_num_iterations}")
-
-            # Always scale steps_per_save
-            old_val = self.config.steps_per_save
-            self.config.steps_per_save = int(old_val * scale)
-            scaled_params.append(f"steps_per_save: {old_val} → {self.config.steps_per_save}")
-
-            # Only scale eval parameters if not in inference mode
-            if test_mode != "inference":
-                old_val = self.config.steps_per_eval_image
-                self.config.steps_per_eval_image = int(old_val * scale)
-                scaled_params.append(f"steps_per_eval_image: {old_val} → {self.config.steps_per_eval_image}")
-
-                old_val = self.config.steps_per_eval_all_images
-                self.config.steps_per_eval_all_images = int(old_val * scale)
-                scaled_params.append(f"steps_per_eval_all_images: {old_val} → {self.config.steps_per_eval_all_images}")
-
-            CONSOLE.log(f"Scaled trainer parameters (scale factor: {scale:.2f}):")
-            for param in scaled_params:
-                CONSOLE.log(f"  {param}")
-
         self.optimizers = self.setup_optimizers()
 
         # set up viewer if enabled
