@@ -171,28 +171,9 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         self.train_dataset = self.create_train_dataset()
         self.eval_dataset = self.create_eval_dataset()
 
-        # Calculate iteration scaling factor for tiling
-        original_train_count = len(self.train_dataparser_outputs.image_filenames)
-        tiled_train_count = len(self.train_dataset)
-        self.iteration_scale_factor = tiled_train_count / original_train_count if original_train_count > 0 else 1.0
-
-        # Scale datamanager parameters if tiling is enabled
-        if self.config.tile_scale_iterations and self.iteration_scale_factor > 1.0:
-            scaled_params = []
-
-            # Only scale fps_reset_every if FPS sampling is used
-            if self.config.train_cameras_sampling_strategy == "fps":
-                old_val = self.config.fps_reset_every
-                self.config.fps_reset_every = int(old_val * self.iteration_scale_factor)
-                scaled_params.append(f"fps_reset_every: {old_val} → {self.config.fps_reset_every}")
-
-            CONSOLE.log(f"Tiling detected: {tiled_train_count} tiles from {original_train_count} images")
-            CONSOLE.log(f"Iteration scale factor: {self.iteration_scale_factor:.2f}")
-
-            if scaled_params:
-                CONSOLE.log("Scaled datamanager parameters:")
-                for param in scaled_params:
-                    CONSOLE.log(f"  {param}")
+        # Calculate iteration scaling factor for tiling (will be updated after actual tiling)
+        self.iteration_scale_factor = 1.0
+        self._scaling_applied = False  # Flag to track if scaling has been applied
 
         if len(self.train_dataset) > 500 and self.config.cache_images == "gpu":
             CONSOLE.print(
@@ -203,6 +184,32 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         # Some logic to make sure we sample every camera in equal amounts
         self.train_unseen_cameras = self.sample_train_cameras()
+
+    def _apply_iteration_scaling(self):
+        """Apply iteration scaling to all relevant parameters after tiling is computed."""
+        if not self.config.tile_scale_iterations or self.iteration_scale_factor <= 1.0:
+            return
+
+        scaled_params = []
+
+        # Only scale fps_reset_every if FPS sampling is used
+        if self.config.train_cameras_sampling_strategy == "fps":
+            old_val = self.config.fps_reset_every
+            self.config.fps_reset_every = int(old_val * self.iteration_scale_factor)
+            scaled_params.append(f"fps_reset_every: {old_val} → {self.config.fps_reset_every}")
+
+        CONSOLE.log(f"Iteration scale factor: {self.iteration_scale_factor:.2f}")
+        if scaled_params:
+            CONSOLE.log("Scaled datamanager parameters:")
+            for param in scaled_params:
+                CONSOLE.log(f"  {param}")
+
+        # Trigger scaling in pipeline and trainer
+        self._trigger_pipeline_scaling()
+
+    def _trigger_pipeline_scaling(self):
+        """Mark that scaling needs to be applied to pipeline and trainer."""
+        self._scaling_applied = True
         self.eval_unseen_cameras = [i for i in range(len(self.eval_dataset))]
         assert len(self.train_unseen_cameras) > 0, "No data found in dataset"
         super().__init__()
@@ -694,6 +701,11 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
                 CONSOLE.log(
                     f"[yellow]Many tiles ({tile_multiplier:.0f}x) - consider larger tile_size_max for efficiency[/yellow]"
                 )
+
+            # Update iteration scale factor and apply scaling for train split
+            if split == "train":
+                self.iteration_scale_factor = tile_multiplier
+                self._apply_iteration_scaling()
 
         # Store tile mapping for debugging
         if split == "train":

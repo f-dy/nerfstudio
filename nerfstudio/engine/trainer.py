@@ -253,6 +253,47 @@ class Trainer:
         writer.put_config(name="config", config_dict=dataclasses.asdict(self.config), step=0)
         profiler.setup_profiler(self.config.logging, writer_log_path)
 
+    def _check_and_apply_scaling(self):
+        """Check if iteration scaling needs to be applied after datamanager setup."""
+        if (
+            hasattr(self.pipeline.datamanager, "iteration_scale_factor")
+            and hasattr(self.pipeline.datamanager, "_scaling_applied")
+            and self.pipeline.datamanager._scaling_applied
+            and self.pipeline.datamanager.iteration_scale_factor > 1.0
+        ):
+            scale = self.pipeline.datamanager.iteration_scale_factor
+            scaled_params = []
+
+            # Always scale max_num_iterations
+            old_val = self.config.max_num_iterations
+            self.config.max_num_iterations = int(old_val * scale)
+            scaled_params.append(f"max_num_iterations: {old_val} → {self.config.max_num_iterations}")
+
+            # Always scale steps_per_save
+            old_val = self.config.steps_per_save
+            self.config.steps_per_save = int(old_val * scale)
+            scaled_params.append(f"steps_per_save: {old_val} → {self.config.steps_per_save}")
+
+            # Only scale eval parameters if not in inference mode
+            if hasattr(self, "test_mode") and self.test_mode != "inference":
+                old_val = self.config.steps_per_eval_image
+                self.config.steps_per_eval_image = int(old_val * scale)
+                scaled_params.append(f"steps_per_eval_image: {old_val} → {self.config.steps_per_eval_image}")
+
+                old_val = self.config.steps_per_eval_all_images
+                self.config.steps_per_eval_all_images = int(old_val * scale)
+                scaled_params.append(f"steps_per_eval_all_images: {old_val} → {self.config.steps_per_eval_all_images}")
+
+            CONSOLE.log(f"Scaled trainer parameters (scale factor: {scale:.2f}):")
+            for param in scaled_params:
+                CONSOLE.log(f"  {param}")
+
+            # Apply model scaling
+            self.pipeline._apply_model_scaling()
+
+            # Mark scaling as complete
+            self.pipeline.datamanager._scaling_applied = False
+
     def setup_optimizers(self) -> Optimizers:
         """Helper to set up the optimizers
 
@@ -266,6 +307,10 @@ class Trainer:
     def train(self) -> None:
         """Train the model."""
         assert self.pipeline.datamanager.train_dataset is not None, "Missing DatsetInputs"
+
+        # Check for updated iteration scaling after datamanager has processed images
+        self._check_and_apply_scaling()
+
         if hasattr(self.pipeline.datamanager, "train_dataparser_outputs"):
             self.pipeline.datamanager.train_dataparser_outputs.save_dataparser_transform(  # type: ignore
                 self.base_dir / "dataparser_transforms.json"
