@@ -132,6 +132,7 @@ Key tiling parameters:
 
 - `tile_size_max`: Maximum tile size in pixels (default: 0, disabled). Images larger than this are split into tiles.
 - `tile_alignment`: Tile dimensions are rounded to multiples of this value for GPU efficiency (default: 16).
+- `tile_scale_iterations`: Automatically scale iteration-based parameters when tiling is used (default: True). When tiling increases the dataset size, training iterations are scaled proportionally to maintain equivalent training coverage.
 
 Example with both memory optimizations:
 
@@ -139,7 +140,24 @@ Example with both memory optimizations:
 ns-train splatfacto --data {PROCESSED_DATA_DIR} \
   --pipeline.datamanager.cache-images cpu \
   --pipeline.datamanager.tile-size-max 512 \
-  --pipeline.datamanager.tile-alignment 16
+  --pipeline.datamanager.tile-alignment 16 \
+  --pipeline.datamanager.tile-scale-iterations True
+```
+
+### Iteration Scaling
+
+When tiling is enabled, the effective dataset size increases (e.g., 100 images → 400 tiles with 2×2 tiling). The `tile_scale_iterations` parameter automatically scales training parameters to maintain equivalent training:
+
+- **Trainer parameters**: `max_num_iterations`, `steps_per_eval_image`, `steps_per_save`, `steps_per_eval_all_images`
+- **Model parameters**: `warmup_length`, `refine_every`, `resolution_schedule`, `stop_split_at`, etc.
+- **Datamanager parameters**: `fps_reset_every`
+
+To disable automatic scaling:
+
+```bash
+ns-train splatfacto --data {PROCESSED_DATA_DIR} \
+  --pipeline.datamanager.tile-size-max 512 \
+  --pipeline.datamanager.tile-scale-iterations False
 ```
 
 Tiling is particularly beneficial for:
