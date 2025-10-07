@@ -139,9 +139,7 @@ Example with both memory optimizations:
 ```bash
 ns-train splatfacto --data {PROCESSED_DATA_DIR} \
   --pipeline.datamanager.cache-images cpu \
-  --pipeline.datamanager.tile-size-max 512 \
-  --pipeline.datamanager.tile-alignment 16 \
-  --pipeline.datamanager.tile-scale-iterations True
+  --pipeline.datamanager.tile-size-max 512
 ```
 
 ### Iteration Scaling
