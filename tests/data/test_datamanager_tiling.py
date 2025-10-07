@@ -912,6 +912,7 @@ class TestCameraHandling:
                 train_cameras_sampling_strategy="fps",
                 fps_reset_every=100,
             )
+            original_fps_value = config_fps.fps_reset_every
 
             datamanager_fps = FullImageDatamanager.__new__(FullImageDatamanager)
             datamanager_fps.config = config_fps
@@ -925,8 +926,8 @@ class TestCameraHandling:
                     )
 
             assert (
-                config_fps.fps_reset_every == 200
-            ), f"FPS sampling should scale fps_reset_every, got {config_fps.fps_reset_every}"
+                config_fps.fps_reset_every == original_fps_value * 2.0
+            ), f"FPS sampling should scale fps_reset_every from {original_fps_value} to {original_fps_value * 2.0}, got {config_fps.fps_reset_every}"
 
             # Test 2: Random sampling - should NOT scale fps_reset_every
             config_random = FullImageDatamanagerConfig(
@@ -936,6 +937,7 @@ class TestCameraHandling:
                 train_cameras_sampling_strategy="random",
                 fps_reset_every=100,
             )
+            original_random_value = config_random.fps_reset_every
 
             datamanager_random = FullImageDatamanager.__new__(FullImageDatamanager)
             datamanager_random.config = config_random
@@ -949,8 +951,8 @@ class TestCameraHandling:
                     )
 
             assert (
-                config_random.fps_reset_every == 100
-            ), f"Random sampling should NOT scale fps_reset_every, got {config_random.fps_reset_every}"
+                config_random.fps_reset_every == original_random_value
+            ), f"Random sampling should NOT scale fps_reset_every, expected {original_random_value}, got {config_random.fps_reset_every}"
 
 
 class TestTilingIntegration:
