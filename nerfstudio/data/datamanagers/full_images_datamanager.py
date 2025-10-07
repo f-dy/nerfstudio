@@ -171,8 +171,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         self.train_dataset = self.create_train_dataset()
         self.eval_dataset = self.create_eval_dataset()
 
-        # Calculate iteration scaling factor for tiling (will be updated after actual tiling)
-        self.iteration_scale_factor = 1.0
+        # Iteration scaling factor will be computed after tiling
         self._scaling_applied = False  # Flag to track if scaling has been applied
 
         if len(self.train_dataset) > 500 and self.config.cache_images == "gpu":
