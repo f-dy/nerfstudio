@@ -294,6 +294,26 @@ class SplatfactoModel(Model):
             raise ValueError(f"""Splatfacto does not support strategy {self.config.strategy}
                              Currently, the supported strategies include default and mcmc.""")
 
+        # Surface the rasterization mode (classic vs antialiased) in the viewer.
+        # The value is baked into the trained model via `rasterize_mode`, so the
+        # control is disabled/frozen: it reflects how the model was trained (and
+        # what a PLY exported from it records as its `SplatRenderMode` comment)
+        # rather than being an interactive toggle. Imported locally to keep the
+        # viewer dependency out of headless import paths.
+        from nerfstudio.viewer.viewer_elements import ViewerDropdown
+
+        self.rasterize_mode_viewer = ViewerDropdown(
+            name="Anti-Aliasing",
+            default_value="antialiased" if self.config.rasterize_mode == "antialiased" else "classic",
+            options=["classic", "antialiased"],
+            disabled=True,
+            hint=(
+                "Rasterization mode this model was trained with (frozen). "
+                "'antialiased' corresponds to a 'SplatRenderMode: mip' comment "
+                "in exported PLY files; 'classic' to 'SplatRenderMode: default'."
+            ),
+        )
+
     @property
     def colors(self):
         if self.config.sh_degree > 0:
