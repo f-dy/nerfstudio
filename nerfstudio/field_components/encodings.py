@@ -27,15 +27,10 @@ from jaxtyping import Float, Int, Shaped
 from torch import Tensor, nn
 
 from nerfstudio.field_components.base_field_component import FieldComponent
-from nerfstudio.utils.math import components_from_spherical_harmonics, expected_sin
+from nerfstudio.utils.external import TCNN_EXISTS, tcnn
+from nerfstudio.utils.math import expected_sin, generate_polyhedron_basis
 from nerfstudio.utils.printing import print_tcnn_speed_warning
-
-try:
-    import tinycudann as tcnn
-
-    TCNN_EXISTS = True
-except ModuleNotFoundError:
-    TCNN_EXISTS = False
+from nerfstudio.utils.spherical_harmonics import MAX_SH_DEGREE, components_from_spherical_harmonics
 
 
 class Encoding(FieldComponent):
@@ -128,13 +123,19 @@ class NeRFEncoding(Encoding):
         if implementation == "tcnn" and not TCNN_EXISTS:
             print_tcnn_speed_warning("NeRFEncoding")
         elif implementation == "tcnn":
-            encoding_config = {"otype": "Frequency", "n_frequencies": num_frequencies}
             assert min_freq_exp == 0, "tcnn only supports min_freq_exp = 0"
             assert max_freq_exp == num_frequencies - 1, "tcnn only supports max_freq_exp = num_frequencies - 1"
+            encoding_config = self.get_tcnn_encoding_config(num_frequencies=self.num_frequencies)
             self.tcnn_encoding = tcnn.Encoding(
                 n_input_dims=in_dim,
                 encoding_config=encoding_config,
             )
+
+    @classmethod
+    def get_tcnn_encoding_config(cls, num_frequencies) -> dict:
+        """Get the encoding configuration for tcnn if implemented"""
+        encoding_config = {"otype": "Frequency", "n_frequencies": num_frequencies}
+        return encoding_config
 
     def get_out_dim(self) -> int:
         if self.in_dim is None:
@@ -159,7 +160,7 @@ class NeRFEncoding(Encoding):
             Output values will be between -1 and 1
         """
         scaled_in_tensor = 2 * torch.pi * in_tensor  # scale to [0, 2pi]
-        freqs = 2 ** torch.linspace(self.min_freq, self.max_freq, self.num_frequencies).to(in_tensor.device)
+        freqs = 2 ** torch.linspace(self.min_freq, self.max_freq, self.num_frequencies, device=in_tensor.device)
         scaled_inputs = scaled_in_tensor[..., None] * freqs  # [..., "input_dim", "num_scales"]
         scaled_inputs = scaled_inputs.view(*scaled_inputs.shape[:-2], -1)  # [..., "input_dim" * "num_scales"]
 
@@ -171,51 +172,64 @@ class NeRFEncoding(Encoding):
             encoded_inputs = expected_sin(
                 torch.cat([scaled_inputs, scaled_inputs + torch.pi / 2.0], dim=-1), torch.cat(2 * [input_var], dim=-1)
             )
-
-        if self.include_input:
-            encoded_inputs = torch.cat([encoded_inputs, in_tensor], dim=-1)
         return encoded_inputs
 
     def forward(
         self, in_tensor: Float[Tensor, "*bs input_dim"], covs: Optional[Float[Tensor, "*bs input_dim input_dim"]] = None
     ) -> Float[Tensor, "*bs output_dim"]:
         if self.tcnn_encoding is not None:
-            return self.tcnn_encoding(in_tensor)
-        return self.pytorch_fwd(in_tensor, covs)
+            encoded_inputs = self.tcnn_encoding(in_tensor)
+        else:
+            encoded_inputs = self.pytorch_fwd(in_tensor, covs)
+        if self.include_input:
+            encoded_inputs = torch.cat([encoded_inputs, in_tensor], dim=-1)
+        return encoded_inputs
 
 
-class RFFEncoding(Encoding):
-    """Random Fourier Feature encoding. Supports integrated encodings.
+class FFEncoding(Encoding):
+    """Fourier Feature encoding. Supports integrated encodings.
 
     Args:
         in_dim: Input dimension of tensor
-        num_frequencies: Number of encoding frequencies
-        scale: Std of Gaussian to sample frequencies. Must be greater than zero
+        basis: Basis matrix from which to construct the Fourier features.
+        num_frequencies: Number of encoded frequencies per axis
+        min_freq_exp: Minimum frequency exponent
+        max_freq_exp: Maximum frequency exponent
         include_input: Append the input coordinate to the encoding
     """
 
-    def __init__(self, in_dim: int, num_frequencies: int, scale: float, include_input: bool = False) -> None:
+    def __init__(
+        self,
+        in_dim: int,
+        basis: Float[Tensor, "M N"],
+        num_frequencies: int,
+        min_freq_exp: float,
+        max_freq_exp: float,
+        include_input: bool = False,
+    ) -> None:
         super().__init__(in_dim)
-
         self.num_frequencies = num_frequencies
-        if not scale > 0:
-            raise ValueError("RFF encoding scale should be greater than zero")
-        self.scale = scale
-        if self.in_dim is None:
-            raise ValueError("Input dimension has not been set")
-        b_matrix = torch.normal(mean=0, std=self.scale, size=(self.in_dim, self.num_frequencies))
-        self.register_buffer(name="b_matrix", tensor=b_matrix)
+        self.min_freq = min_freq_exp
+        self.max_freq = max_freq_exp
+        self.register_buffer(name="b_matrix", tensor=basis)
+        self.b_matrix: Tensor
         self.include_input = include_input
 
     def get_out_dim(self) -> int:
-        return self.num_frequencies * 2
+        if self.in_dim is None:
+            raise ValueError("Input dimension has not been set")
+        assert isinstance(self.b_matrix, Tensor)
+        out_dim = self.b_matrix.shape[1] * self.num_frequencies * 2
+        if self.include_input:
+            out_dim += self.in_dim
+        return out_dim
 
     def forward(
         self,
         in_tensor: Float[Tensor, "*bs input_dim"],
         covs: Optional[Float[Tensor, "*bs input_dim input_dim"]] = None,
     ) -> Float[Tensor, "*bs output_dim"]:
-        """Calculates RFF encoding. If covariances are provided the encodings will be integrated as proposed
+        """Calculates FF encoding. If covariances are provided the encodings will be integrated as proposed
             in mip-NeRF.
 
         Args:
@@ -227,11 +241,16 @@ class RFFEncoding(Encoding):
         """
         scaled_in_tensor = 2 * torch.pi * in_tensor  # scale to [0, 2pi]
         scaled_inputs = scaled_in_tensor @ self.b_matrix  # [..., "num_frequencies"]
+        freqs = 2 ** torch.linspace(self.min_freq, self.max_freq, self.num_frequencies, device=in_tensor.device)
+        scaled_inputs = scaled_inputs[..., None] * freqs  # [..., "input_dim", "num_scales"]
+        scaled_inputs = scaled_inputs.view(*scaled_inputs.shape[:-2], -1)  # [..., "input_dim" * "num_scales"]
 
         if covs is None:
             encoded_inputs = torch.sin(torch.cat([scaled_inputs, scaled_inputs + torch.pi / 2.0], dim=-1))
         else:
             input_var = torch.sum((covs @ self.b_matrix) * self.b_matrix, -2)
+            input_var = input_var[..., :, None] * freqs[None, :] ** 2
+            input_var = input_var.reshape((*input_var.shape[:-2], -1))
             encoded_inputs = expected_sin(
                 torch.cat([scaled_inputs, scaled_inputs + torch.pi / 2.0], dim=-1), torch.cat(2 * [input_var], dim=-1)
             )
@@ -240,6 +259,49 @@ class RFFEncoding(Encoding):
             encoded_inputs = torch.cat([encoded_inputs, in_tensor], dim=-1)
 
         return encoded_inputs
+
+
+class RFFEncoding(FFEncoding):
+    """Random Fourier Feature encoding. Supports integrated encodings.
+
+    Args:
+        in_dim: Input dimension of tensor
+        num_frequencies: Number of encoding frequencies
+        scale: Std of Gaussian to sample frequencies. Must be greater than zero
+        include_input: Append the input coordinate to the encoding
+    """
+
+    def __init__(self, in_dim: int, num_frequencies: int, scale: float, include_input: bool = False) -> None:
+        if not scale > 0:
+            raise ValueError("RFF encoding scale should be greater than zero")
+
+        b_matrix = torch.normal(mean=0, std=scale, size=(in_dim, num_frequencies))
+        super().__init__(in_dim, b_matrix, 1, 0.0, 0.0, include_input)
+
+
+class PolyhedronFFEncoding(FFEncoding):
+    """Fourier Feature encoding using polyhedron basis as proposed by mip-NeRF360. Supports integrated encodings.
+
+    Args:
+        num_frequencies: Number of encoded frequencies per axis
+        min_freq_exp: Minimum frequency exponent
+        max_freq_exp: Maximum frequency exponent
+        basis_shape: Shape of polyhedron basis. Either "octahedron" or "icosahedron"
+        basis_subdivisions: Number of times to tesselate the polyhedron.
+        include_input: Append the input coordinate to the encoding
+    """
+
+    def __init__(
+        self,
+        num_frequencies: int,
+        min_freq_exp: float,
+        max_freq_exp: float,
+        basis_shape: Literal["octahedron", "icosahedron"] = "octahedron",
+        basis_subdivisions: int = 1,
+        include_input: bool = False,
+    ) -> None:
+        basis_t = generate_polyhedron_basis(basis_shape, basis_subdivisions).T
+        super().__init__(3, basis_t, num_frequencies, min_freq_exp, max_freq_exp, include_input)
 
 
 class HashEncoding(Encoding):
@@ -264,48 +326,71 @@ class HashEncoding(Encoding):
         log2_hashmap_size: int = 19,
         features_per_level: int = 2,
         hash_init_scale: float = 0.001,
-        implementation: Literal["tcnn", "torch"] = "torch",
+        implementation: Literal["tcnn", "torch"] = "tcnn",
         interpolation: Optional[Literal["Nearest", "Linear", "Smoothstep"]] = None,
     ) -> None:
         super().__init__(in_dim=3)
         self.num_levels = num_levels
+        self.min_res = min_res
         self.features_per_level = features_per_level
+        self.hash_init_scale = hash_init_scale
         self.log2_hashmap_size = log2_hashmap_size
         self.hash_table_size = 2**log2_hashmap_size
 
         levels = torch.arange(num_levels)
-        growth_factor = np.exp((np.log(max_res) - np.log(min_res)) / (num_levels - 1))
-        self.scalings = torch.floor(min_res * growth_factor**levels)
+        self.growth_factor = np.exp((np.log(max_res) - np.log(min_res)) / (num_levels - 1)) if num_levels > 1 else 1
+        self.scalings = torch.floor(min_res * self.growth_factor**levels)
 
         self.hash_offset = levels * self.hash_table_size
-        self.hash_table = torch.rand(size=(self.hash_table_size * num_levels, features_per_level)) * 2 - 1
-        self.hash_table *= hash_init_scale
-        self.hash_table = nn.Parameter(self.hash_table)
 
         self.tcnn_encoding = None
-        if implementation == "tcnn" and not TCNN_EXISTS:
+        self.hash_table = torch.empty(0)
+        if implementation == "torch":
+            self.build_nn_modules()
+        elif implementation == "tcnn" and not TCNN_EXISTS:
             print_tcnn_speed_warning("HashEncoding")
+            self.build_nn_modules()
         elif implementation == "tcnn":
-            encoding_config = {
-                "otype": "HashGrid",
-                "n_levels": self.num_levels,
-                "n_features_per_level": self.features_per_level,
-                "log2_hashmap_size": self.log2_hashmap_size,
-                "base_resolution": min_res,
-                "per_level_scale": growth_factor,
-            }
-            if interpolation is not None:
-                encoding_config["interpolation"] = interpolation
-
+            encoding_config = self.get_tcnn_encoding_config(
+                num_levels=self.num_levels,
+                features_per_level=self.features_per_level,
+                log2_hashmap_size=self.log2_hashmap_size,
+                min_res=self.min_res,
+                growth_factor=self.growth_factor,
+                interpolation=interpolation,
+            )
             self.tcnn_encoding = tcnn.Encoding(
                 n_input_dims=3,
                 encoding_config=encoding_config,
             )
 
         if self.tcnn_encoding is None:
-            assert (
-                interpolation is None or interpolation == "Linear"
-            ), f"interpolation '{interpolation}' is not supported for torch encoding backend"
+            assert interpolation is None or interpolation == "Linear", (
+                f"interpolation '{interpolation}' is not supported for torch encoding backend"
+            )
+
+    def build_nn_modules(self) -> None:
+        """Initialize the torch version of the hash encoding."""
+        self.hash_table = torch.rand(size=(self.hash_table_size * self.num_levels, self.features_per_level)) * 2 - 1
+        self.hash_table *= self.hash_init_scale
+        self.hash_table = nn.Parameter(self.hash_table)
+
+    @classmethod
+    def get_tcnn_encoding_config(
+        cls, num_levels, features_per_level, log2_hashmap_size, min_res, growth_factor, interpolation=None
+    ) -> dict:
+        """Get the encoding configuration for tcnn if implemented"""
+        encoding_config = {
+            "otype": "HashGrid",
+            "n_levels": num_levels,
+            "n_features_per_level": features_per_level,
+            "log2_hashmap_size": log2_hashmap_size,
+            "base_resolution": min_res,
+            "per_level_scale": growth_factor,
+        }
+        if interpolation is not None:
+            encoding_config["interpolation"] = interpolation
+        return encoding_config
 
     def get_out_dim(self) -> int:
         return self.num_levels * self.features_per_level
@@ -421,9 +506,8 @@ class TensorCPEncoding(Encoding):
             resolution: Target resolution.
         """
 
-        self.line_coef.data = F.interpolate(
-            self.line_coef.data, size=(resolution, 1), mode="bilinear", align_corners=True
-        )
+        line_coef = F.interpolate(self.line_coef.data, size=(resolution, 1), mode="bilinear", align_corners=True)
+        self.line_coef = torch.nn.Parameter(line_coef)
 
         self.resolution = resolution
 
@@ -669,14 +753,16 @@ class SHEncoding(Encoding):
     """Spherical harmonic encoding
 
     Args:
-        levels: Number of spherical harmonic levels to encode.
+        levels: Number of spherical harmonic levels to encode. (level = sh degree + 1)
     """
 
     def __init__(self, levels: int = 4, implementation: Literal["tcnn", "torch"] = "torch") -> None:
         super().__init__(in_dim=3)
 
-        if levels <= 0 or levels > 4:
-            raise ValueError(f"Spherical harmonic encoding only supports 1 to 4 levels, requested {levels}")
+        if levels <= 0 or levels > MAX_SH_DEGREE + 1:
+            raise ValueError(
+                f"Spherical harmonic encoding only supports 1 to {MAX_SH_DEGREE + 1} levels, requested {levels}"
+            )
 
         self.levels = levels
 
@@ -684,14 +770,20 @@ class SHEncoding(Encoding):
         if implementation == "tcnn" and not TCNN_EXISTS:
             print_tcnn_speed_warning("SHEncoding")
         elif implementation == "tcnn":
-            encoding_config = {
-                "otype": "SphericalHarmonics",
-                "degree": levels,
-            }
+            encoding_config = self.get_tcnn_encoding_config(levels=self.levels)
             self.tcnn_encoding = tcnn.Encoding(
                 n_input_dims=3,
                 encoding_config=encoding_config,
             )
+
+    @classmethod
+    def get_tcnn_encoding_config(cls, levels: int) -> dict:
+        """Get the encoding configuration for tcnn if implemented"""
+        encoding_config = {
+            "otype": "SphericalHarmonics",
+            "degree": levels,
+        }
+        return encoding_config
 
     def get_out_dim(self) -> int:
         return self.levels**2
@@ -699,7 +791,7 @@ class SHEncoding(Encoding):
     @torch.no_grad()
     def pytorch_fwd(self, in_tensor: Float[Tensor, "*bs input_dim"]) -> Float[Tensor, "*bs output_dim"]:
         """Forward pass using pytorch. Significantly slower than TCNN implementation."""
-        return components_from_spherical_harmonics(levels=self.levels, directions=in_tensor)
+        return components_from_spherical_harmonics(degree=self.levels - 1, directions=in_tensor)
 
     def forward(self, in_tensor: Float[Tensor, "*bs input_dim"]) -> Float[Tensor, "*bs output_dim"]:
         if self.tcnn_encoding is not None:

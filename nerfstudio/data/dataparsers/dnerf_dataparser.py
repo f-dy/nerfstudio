@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Data parser for blender dataset"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -24,11 +25,7 @@ import numpy as np
 import torch
 
 from nerfstudio.cameras.cameras import Cameras, CameraType
-from nerfstudio.data.dataparsers.base_dataparser import (
-    DataParser,
-    DataParserConfig,
-    DataparserOutputs,
-)
+from nerfstudio.data.dataparsers.base_dataparser import DataParser, DataParserConfig, DataparserOutputs
 from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.utils.colors import get_color
 from nerfstudio.utils.io import load_from_json

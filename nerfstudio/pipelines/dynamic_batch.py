@@ -17,7 +17,7 @@ A pipeline that dynamically chooses the number of rays to sample.
 """
 
 from dataclasses import dataclass, field
-from typing import Literal, Type, Optional
+from typing import Literal, Optional, Type
 
 import torch
 from torch.cuda.amp.grad_scaler import GradScaler
@@ -54,9 +54,9 @@ class DynamicBatchPipeline(VanillaPipeline):
         grad_scaler: Optional[GradScaler] = None,
     ):
         super().__init__(config, device, test_mode, world_size, local_rank)
-        assert isinstance(
-            self.datamanager, VanillaDataManager
-        ), "DynamicBatchPipeline only works with VanillaDataManager."
+        assert isinstance(self.datamanager, VanillaDataManager), (
+            "DynamicBatchPipeline only works with VanillaDataManager."
+        )
 
         self.dynamic_num_rays_per_batch = self.config.target_num_samples // self.config.max_num_samples_per_ray
         self._update_pixel_samplers()

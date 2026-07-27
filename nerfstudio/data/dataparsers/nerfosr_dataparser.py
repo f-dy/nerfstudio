@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Data parser for NeRF-OSR datasets
+"""Data parser for NeRF-OSR datasets
 
-    Presented in the paper: https://4dqv.mpi-inf.mpg.de/NeRF-OSR/
+Presented in the paper: https://4dqv.mpi-inf.mpg.de/NeRF-OSR/
 
 """
 
@@ -30,11 +30,7 @@ import torch
 
 from nerfstudio.cameras import camera_utils
 from nerfstudio.cameras.cameras import Cameras, CameraType
-from nerfstudio.data.dataparsers.base_dataparser import (
-    DataParser,
-    DataParserConfig,
-    DataparserOutputs,
-)
+from nerfstudio.data.dataparsers.base_dataparser import DataParser, DataParserConfig, DataparserOutputs
 from nerfstudio.data.scene_box import SceneBox
 
 

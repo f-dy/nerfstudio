@@ -57,7 +57,7 @@ class DataparserOutputs:
     """Camera object storing collection of camera information in dataset."""
     alpha_color: Optional[Float[Tensor, "3"]] = None
     """Color of dataset background."""
-    scene_box: SceneBox = SceneBox(aabb=torch.tensor([[-1, -1, -1], [1, 1, 1]]))
+    scene_box: SceneBox = field(default_factory=lambda: SceneBox(aabb=torch.tensor([[-1, -1, -1], [1, 1, 1]])))
     """Scene box of dataset. Used to bound the scene or provide the scene scale depending on model."""
     mask_filenames: Optional[List[Path]] = None
     """Filenames for any masks that are required"""
@@ -141,26 +141,28 @@ class DataParser:
         self.config = config
 
     @abstractmethod
-    def _generate_dataparser_outputs(self, split: str = "train") -> DataparserOutputs:
+    def _generate_dataparser_outputs(self, split: str = "train", **kwargs: Optional[Dict]) -> DataparserOutputs:
         """Abstract method that returns the dataparser outputs for the given split.
 
         Args:
             split: Which dataset split to generate (train/test).
+            kwargs: kwargs for generating dataparser outputs.
 
         Returns:
             DataparserOutputs containing data for the specified dataset and split
         """
 
-    def get_dataparser_outputs(self, split: str = "train") -> DataparserOutputs:
+    def get_dataparser_outputs(self, split: str = "train", **kwargs: Optional[Dict]) -> DataparserOutputs:
         """Returns the dataparser outputs for the given split.
 
         Args:
             split: Which dataset split to generate (train/test).
+            kwargs: kwargs for generating dataparser outputs.
 
         Returns:
             DataparserOutputs containing data for the specified dataset and split
         """
-        dataparser_outputs = self._generate_dataparser_outputs(split)
+        dataparser_outputs = self._generate_dataparser_outputs(split, **kwargs)
         return dataparser_outputs
 
 

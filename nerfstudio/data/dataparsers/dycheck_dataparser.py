@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Data parser for DyCheck (https://arxiv.org/abs/2210.13445) dataset of `iphone` subset"""
+
 from __future__ import annotations
 
 import math
@@ -25,11 +26,7 @@ import numpy as np
 import torch
 
 from nerfstudio.cameras.cameras import Cameras, CameraType
-from nerfstudio.data.dataparsers.base_dataparser import (
-    DataParser,
-    DataParserConfig,
-    DataparserOutputs,
-)
+from nerfstudio.data.dataparsers.base_dataparser import DataParser, DataParserConfig, DataparserOutputs
 from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.utils.colors import get_color
 from nerfstudio.utils.io import load_from_json
@@ -50,7 +47,7 @@ def downscale(img, scale: int) -> np.ndarray:
         return img
     height, width = img.shape[:2]
     if height % scale > 0 or width % scale > 0:
-        raise ValueError(f"Image shape ({height},{width}) must be divisible by the" f" scale ({scale}).")
+        raise ValueError(f"Image shape ({height},{width}) must be divisible by the scale ({scale}).")
     out_height, out_width = height // scale, width // scale
     resized = cv2.resize(img, (out_width, out_height), cv2.INTER_AREA)  # type: ignore
     return resized
@@ -173,7 +170,10 @@ def _rescale_depth(depth_raw: np.ndarray, cam: Dict) -> np.ndarray:
     viewdirs /= np.linalg.norm(viewdirs, axis=-1, keepdims=True)
     viewdirs = viewdirs.reshape((*batch_shape, 3))
     cosa = viewdirs @ (cam["camera_to_worlds"][:, 2])
-    depth = depth_raw / cosa[..., None]
+    if depth_raw.ndim == cosa.ndim:
+        depth = depth_raw[..., None] / cosa[..., None]
+    else:
+        depth = depth_raw / cosa[..., None]
     return depth
 
 
@@ -289,8 +289,8 @@ class Dycheck(DataParser):
             cam_json = load_from_json(self.data / f"camera/{frame}.json")
             c2w = torch.as_tensor(cam_json["orientation"]).T
             position = torch.as_tensor(cam_json["position"])
-            position -= self._center  # some scenes look weird (wheel)
-            position *= self._scale * self.config.scale_factor
+            position -= torch.as_tensor(self._center)  # some scenes look weird (wheel)
+            position *= torch.as_tensor(self._scale) * self.config.scale_factor
             pose = torch.zeros([3, 4])
             pose[:3, :3] = c2w
             pose[:3, 3] = position
@@ -322,7 +322,7 @@ class Dycheck(DataParser):
             for frame in frame_names:
                 cv2.imwrite(
                     str(self.data / f"rgb/{d}x/{frame}.png"),
-                    cv2.resize(cv2.imread(str(self.data / f"rgb/1x/{frame}.png")), (h, w)),
+                    cv2.resize(cv2.imread(str(self.data / f"rgb/1x/{frame}.png")), (w, h)),
                 )
             CONSOLE.print("finished")
 

@@ -16,31 +16,31 @@
 Export utils such as structs, point cloud generation, and rendering code.
 """
 
-
 from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import open3d as o3d
 import pymeshlab
 import torch
 from jaxtyping import Float
-from rich.progress import (
-    BarColumn,
-    Progress,
-    TaskProgressColumn,
-    TextColumn,
-    TimeRemainingColumn,
-)
+from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
 from torch import Tensor
 
+from nerfstudio.cameras.camera_optimizers import CameraOptimizer
 from nerfstudio.cameras.cameras import Cameras
+from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.data.datasets.base_dataset import InputDataset
+from nerfstudio.data.scene_box import OrientedBox
 from nerfstudio.pipelines.base_pipeline import Pipeline, VanillaPipeline
 from nerfstudio.utils.rich_utils import CONSOLE, ItersPerSecColumn
+
+if TYPE_CHECKING:
+    # Importing open3d can take ~1 second, so only do it below if we actually
+    # need it.
+    import open3d as o3d
 
 
 @dataclass
@@ -85,12 +85,11 @@ def generate_point_cloud(
     num_points: int = 1000000,
     remove_outliers: bool = True,
     estimate_normals: bool = False,
+    reorient_normals: bool = False,
     rgb_output_name: str = "rgb",
     depth_output_name: str = "depth",
     normal_output_name: Optional[str] = None,
-    use_bounding_box: bool = True,
-    bounding_box_min: Tuple[float, float, float] = (-1.0, -1.0, -1.0),
-    bounding_box_max: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    crop_obb: Optional[OrientedBox] = None,
     std_ratio: float = 10.0,
 ) -> o3d.geometry.PointCloud:
     """Generate a point cloud from a nerf.
@@ -99,13 +98,11 @@ def generate_point_cloud(
         pipeline: Pipeline to evaluate with.
         num_points: Number of points to generate. May result in less if outlier removal is used.
         remove_outliers: Whether to remove outliers.
+        reorient_normals: Whether to re-orient the normals based on the view direction.
         estimate_normals: Whether to estimate normals.
         rgb_output_name: Name of the RGB output.
         depth_output_name: Name of the depth output.
         normal_output_name: Name of the normal output.
-        use_bounding_box: Whether to use a bounding box to sample points.
-        bounding_box_min: Minimum of the bounding box.
-        bounding_box_max: Maximum of the bounding box.
         std_ratio: Threshold based on STD of the average distances across the point cloud to remove outliers.
 
     Returns:
@@ -122,6 +119,7 @@ def generate_point_cloud(
     points = []
     rgbs = []
     normals = []
+    view_directions = []
     with progress as progress_bar:
         task = progress_bar.add_task("Generating Point Cloud", total=num_points)
         while not progress_bar.finished:
@@ -129,6 +127,7 @@ def generate_point_cloud(
 
             with torch.no_grad():
                 ray_bundle, _ = pipeline.datamanager.next_train(0)
+                assert isinstance(ray_bundle, RayBundle)
                 outputs = pipeline.model(ray_bundle)
             if rgb_output_name not in outputs:
                 CONSOLE.rule("Error", style="red")
@@ -140,7 +139,7 @@ def generate_point_cloud(
                 CONSOLE.print(f"Could not find {depth_output_name} in the model outputs", justify="center")
                 CONSOLE.print(f"Please set --depth_output_name to one of: {outputs.keys()}", justify="center")
                 sys.exit(1)
-            rgb = outputs[rgb_output_name]
+            rgba = pipeline.model.get_rgba_image(outputs, rgb_output_name)
             depth = outputs[depth_output_name]
             if normal_output_name is not None:
                 if normal_output_name not in outputs:
@@ -149,31 +148,40 @@ def generate_point_cloud(
                     CONSOLE.print(f"Please set --normal_output_name to one of: {outputs.keys()}", justify="center")
                     sys.exit(1)
                 normal = outputs[normal_output_name]
-                assert (
-                    torch.min(normal) >= 0.0 and torch.max(normal) <= 1.0
-                ), "Normal values from method output must be in [0, 1]"
+                assert torch.min(normal) >= 0.0 and torch.max(normal) <= 1.0, (
+                    "Normal values from method output must be in [0, 1]"
+                )
                 normal = (normal * 2.0) - 1.0
             point = ray_bundle.origins + ray_bundle.directions * depth
+            view_direction = ray_bundle.directions
 
-            if use_bounding_box:
-                comp_l = torch.tensor(bounding_box_min, device=point.device)
-                comp_m = torch.tensor(bounding_box_max, device=point.device)
-                assert torch.all(
-                    comp_l < comp_m
-                ), f"Bounding box min {bounding_box_min} must be smaller than max {bounding_box_max}"
-                mask = torch.all(torch.concat([point > comp_l, point < comp_m], dim=-1), dim=-1)
+            # Filter points with opacity lower than 0.5
+            mask = rgba[..., -1] > 0.5
+            point = point[mask]
+            view_direction = view_direction[mask]
+            rgb = rgba[mask][..., :3]
+            if normal is not None:
+                normal = normal[mask]
+
+            if crop_obb is not None:
+                mask = crop_obb.within(point)
                 point = point[mask]
                 rgb = rgb[mask]
+                view_direction = view_direction[mask]
                 if normal is not None:
                     normal = normal[mask]
 
             points.append(point)
             rgbs.append(rgb)
+            view_directions.append(view_direction)
             if normal is not None:
                 normals.append(normal)
             progress.advance(task, point.shape[0])
     points = torch.cat(points, dim=0)
     rgbs = torch.cat(rgbs, dim=0)
+    view_directions = torch.cat(view_directions, dim=0).cpu()
+
+    import open3d as o3d
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points.double().cpu().numpy())
@@ -185,6 +193,8 @@ def generate_point_cloud(
         pcd, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=std_ratio)
         print("\033[A\033[A")
         CONSOLE.print("[bold green]:white_check_mark: Cleaning Point Cloud")
+        if ind is not None:
+            view_directions = view_directions[ind]
 
     # either estimate_normals or normal_output_name, not both
     if estimate_normals:
@@ -203,6 +213,13 @@ def generate_point_cloud(
             normals = normals[ind]
         pcd.normals = o3d.utility.Vector3dVector(normals.double().cpu().numpy())
 
+    # re-orient the normals
+    if reorient_normals:
+        normals = torch.from_numpy(np.array(pcd.normals)).float()
+        mask = torch.sum(view_directions * normals, dim=-1) > 0
+        normals[mask] *= -1
+        pcd.normals = o3d.utility.Vector3dVector(normals.double().cpu().numpy())
+
     return pcd
 
 
@@ -213,6 +230,7 @@ def render_trajectory(
     depth_output_name: str,
     rendered_resolution_scaling_factor: float = 1.0,
     disable_distortion: bool = False,
+    return_rgba_images: bool = False,
 ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
     """Helper function to create a video of a trajectory.
 
@@ -223,6 +241,7 @@ def render_trajectory(
         depth_output_name: Name of the depth output.
         rendered_resolution_scaling_factor: Scaling factor to apply to the camera image resolution.
         disable_distortion: Whether to disable distortion.
+        return_rgba_images: Whether to return RGBA images (default RGB).
 
     Returns:
         List of rgb images, list of depth images.
@@ -255,16 +274,23 @@ def render_trajectory(
                 CONSOLE.print(f"Could not find {depth_output_name} in the model outputs", justify="center")
                 CONSOLE.print(f"Please set --depth_output_name to one of: {outputs.keys()}", justify="center")
                 sys.exit(1)
-            images.append(outputs[rgb_output_name].cpu().numpy())
+            if return_rgba_images:
+                image = pipeline.model.get_rgba_image(outputs, rgb_output_name)
+            else:
+                image = outputs[rgb_output_name]
+            images.append(image.cpu().numpy())
             depths.append(outputs[depth_output_name].cpu().numpy())
     return images, depths
 
 
-def collect_camera_poses_for_dataset(dataset: Optional[InputDataset]) -> List[Dict[str, Any]]:
+def collect_camera_poses_for_dataset(
+    dataset: Optional[InputDataset], camera_optimizer: Optional[CameraOptimizer] = None
+) -> List[Dict[str, Any]]:
     """Collects rescaled, translated and optimised camera poses for a dataset.
 
     Args:
         dataset: Dataset to collect camera poses for.
+        camera_optimizer: Camera optimizer that has been used for adjusting the poses
 
     Returns:
         List of dicts containing camera poses.
@@ -281,7 +307,15 @@ def collect_camera_poses_for_dataset(dataset: Optional[InputDataset]) -> List[Di
     # new cameras are in cameras, whereas image paths are stored in a private member of the dataset
     for idx in range(len(cameras)):
         image_filename = image_filenames[idx]
-        transform = cameras.camera_to_worlds[idx].tolist()
+        if camera_optimizer is None:
+            transform = cameras.camera_to_worlds[idx].tolist()
+        else:
+            # print('exporting optimized camera pose for camera %d' % idx)
+            camera = cameras[idx : idx + 1]
+            assert camera.metadata is not None
+            camera.metadata["cam_idx"] = idx
+            transform = camera_optimizer.apply_to_camera(camera).tolist()[0]
+
         frames.append(
             {
                 "file_path": str(image_filename),
@@ -308,7 +342,13 @@ def collect_camera_poses(pipeline: VanillaPipeline) -> Tuple[List[Dict[str, Any]
     eval_dataset = pipeline.datamanager.eval_dataset
     assert isinstance(eval_dataset, InputDataset)
 
-    train_frames = collect_camera_poses_for_dataset(train_dataset)
+    camera_optimizer = None
+    if hasattr(pipeline.model, "camera_optimizer"):
+        camera_optimizer = pipeline.model.camera_optimizer
+        assert isinstance(camera_optimizer, CameraOptimizer)
+
+    train_frames = collect_camera_poses_for_dataset(train_dataset, camera_optimizer)
+    # Note: returning original poses, even if --eval-mode=all
     eval_frames = collect_camera_poses_for_dataset(eval_dataset)
 
     return train_frames, eval_frames

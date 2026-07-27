@@ -15,6 +15,7 @@
 """
 Callback code used for training iterations
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from torch.cuda.amp.grad_scaler import GradScaler
 from nerfstudio.engine.optimizers import Optimizers
 
 if TYPE_CHECKING:
+    from nerfstudio.engine.trainer import Trainer
     from nerfstudio.pipelines.base_pipeline import Pipeline
 
 
@@ -43,6 +45,8 @@ class TrainingCallbackAttributes:
     """gradient scalers"""
     pipeline: Optional["Pipeline"]  # Prevent circular import.
     """reference to training pipeline"""
+    trainer: Optional["Trainer"]  # Prevent circular import.
+    """reference to trainer"""
 
 
 class TrainingCallbackLocation(Enum):
@@ -76,9 +80,9 @@ class TrainingCallback:
         args: Optional[List] = None,
         kwargs: Optional[Dict] = None,
     ):
-        assert (
-            "step" in signature(func).parameters.keys()
-        ), f"'step: int' must be an argument in the callback function 'func': {func.__name__}"
+        assert "step" in signature(func).parameters.keys(), (
+            f"'step: int' must be an argument in the callback function 'func': {func.__name__}"
+        )
         self.where_to_run = where_to_run
         self.update_every_num_iters = update_every_num_iters
         self.iters = iters

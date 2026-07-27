@@ -15,6 +15,7 @@
 """
 Profiler base class and functionality
 """
+
 from __future__ import annotations
 
 import functools
@@ -24,28 +25,13 @@ import typing
 from collections import deque
 from contextlib import ContextDecorator, contextmanager
 from pathlib import Path
-from typing import (
-    Any,
-    Callable,
-    ContextManager,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    TypeVar,
-    Union,
-    overload,
-)
+from typing import Any, Callable, ContextManager, Dict, List, Optional, Tuple, TypeVar, Union, overload
 
 from torch.profiler import ProfilerActivity, profile, record_function
 
 from nerfstudio.configs import base_config as cfg
 from nerfstudio.utils import comms
-from nerfstudio.utils.decorators import (
-    check_main_thread,
-    check_profiler_enabled,
-    decorate_all,
-)
+from nerfstudio.utils.decorators import check_main_thread, check_profiler_enabled, decorate_all
 from nerfstudio.utils.rich_utils import CONSOLE
 
 PROFILER = []
@@ -56,13 +42,11 @@ CallableT = TypeVar("CallableT", bound=Callable)
 
 
 @overload
-def time_function(name_or_func: CallableT) -> CallableT:
-    ...
+def time_function(name_or_func: CallableT) -> CallableT: ...
 
 
 @overload
-def time_function(name_or_func: str) -> ContextManager[Any]:
-    ...
+def time_function(name_or_func: str) -> ContextManager[Any]: ...
 
 
 def time_function(name_or_func: Union[CallableT, str]) -> Union[CallableT, ContextManager[Any]]:
@@ -74,7 +58,7 @@ def time_function(name_or_func: Union[CallableT, str]) -> Union[CallableT, Conte
     Returns:
         A wrapped function or context to use in a `with` statement.
     """
-    return _TimeFunction(name_or_func)
+    return _TimeFunction(name_or_func)  # type: ignore[reportReturnType]
 
 
 class _TimeFunction(ContextDecorator):

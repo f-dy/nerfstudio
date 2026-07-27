@@ -12,82 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Math Helper Functions """
+"""Math Helper Functions"""
 
+import itertools
+import math
 from dataclasses import dataclass
 from typing import Literal, Tuple
 
 import torch
-from jaxtyping import Bool, Float
+from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from nerfstudio.utils.misc import torch_compile
-
-
-def components_from_spherical_harmonics(
-    levels: int, directions: Float[Tensor, "*batch 3"]
-) -> Float[Tensor, "*batch components"]:
-    """
-    Returns value for each component of spherical harmonics.
-
-    Args:
-        levels: Number of spherical harmonic levels to compute.
-        directions: Spherical harmonic coefficients
-    """
-    num_components = levels**2
-    components = torch.zeros((*directions.shape[:-1], num_components), device=directions.device)
-
-    assert 1 <= levels <= 5, f"SH levels must be in [1,4], got {levels}"
-    assert directions.shape[-1] == 3, f"Direction input should have three dimensions. Got {directions.shape[-1]}"
-
-    x = directions[..., 0]
-    y = directions[..., 1]
-    z = directions[..., 2]
-
-    xx = x**2
-    yy = y**2
-    zz = z**2
-
-    # l0
-    components[..., 0] = 0.28209479177387814
-
-    # l1
-    if levels > 1:
-        components[..., 1] = 0.4886025119029199 * y
-        components[..., 2] = 0.4886025119029199 * z
-        components[..., 3] = 0.4886025119029199 * x
-
-    # l2
-    if levels > 2:
-        components[..., 4] = 1.0925484305920792 * x * y
-        components[..., 5] = 1.0925484305920792 * y * z
-        components[..., 6] = 0.9461746957575601 * zz - 0.31539156525251999
-        components[..., 7] = 1.0925484305920792 * x * z
-        components[..., 8] = 0.5462742152960396 * (xx - yy)
-
-    # l3
-    if levels > 3:
-        components[..., 9] = 0.5900435899266435 * y * (3 * xx - yy)
-        components[..., 10] = 2.890611442640554 * x * y * z
-        components[..., 11] = 0.4570457994644658 * y * (5 * zz - 1)
-        components[..., 12] = 0.3731763325901154 * z * (5 * zz - 3)
-        components[..., 13] = 0.4570457994644658 * x * (5 * zz - 1)
-        components[..., 14] = 1.445305721320277 * z * (xx - yy)
-        components[..., 15] = 0.5900435899266435 * x * (xx - 3 * yy)
-
-    # l4
-    if levels > 4:
-        components[..., 16] = 2.5033429417967046 * x * y * (xx - yy)
-        components[..., 17] = 1.7701307697799304 * y * z * (3 * xx - yy)
-        components[..., 18] = 0.9461746957575601 * x * y * (7 * zz - 1)
-        components[..., 19] = 0.6690465435572892 * y * (7 * zz - 3)
-        components[..., 20] = 0.10578554691520431 * (35 * zz * zz - 30 * zz + 3)
-        components[..., 21] = 0.6690465435572892 * x * z * (7 * zz - 3)
-        components[..., 22] = 0.47308734787878004 * (xx - yy) * (7 * zz - 1)
-        components[..., 23] = 1.7701307697799304 * x * z * (xx - 3 * yy)
-        components[..., 24] = 0.4425326924449826 * (xx * (xx - 3 * yy) - yy * (3 * xx - yy))
-
-    return components
+from nerfstudio.data.scene_box import OrientedBox
 
 
 @dataclass
@@ -195,11 +131,10 @@ def expected_sin(x_means: torch.Tensor, x_vars: torch.Tensor) -> torch.Tensor:
     Returns:
         torch.Tensor: The expected value of sin.
     """
-
     return torch.exp(-0.5 * x_vars) * torch.sin(x_means)
 
 
-@torch_compile(dynamic=True, mode="reduce-overhead", backend="eager")
+# @torch_compile(dynamic=True, mode="reduce-overhead", backend="eager")
 def intersect_aabb(
     origins: torch.Tensor,
     directions: torch.Tensor,
@@ -236,6 +171,42 @@ def intersect_aabb(
     cond = t_max <= t_min
     t_min = torch.where(cond, invalid_value, t_min)
     t_max = torch.where(cond, invalid_value, t_max)
+
+    return t_min, t_max
+
+
+def intersect_obb(
+    origins: torch.Tensor,
+    directions: torch.Tensor,
+    obb: OrientedBox,
+    max_bound: float = 1e10,
+    invalid_value: float = 1e10,
+):
+    """
+    Ray intersection with an oriented bounding box (OBB)
+
+    Args:
+        origins: [N,3] tensor of 3d positions
+        directions: [N,3] tensor of normalized directions
+        R: [3,3] rotation matrix
+        T: [3] translation vector
+        S: [3] extents of the bounding box
+        max_bound: Maximum value of t_max
+        invalid_value: Value to return in case of no intersection
+    """
+    # Transform ray to OBB space
+    R, T, S = obb.R, obb.T, obb.S.to(origins.device)
+    H = torch.eye(4, device=origins.device, dtype=origins.dtype)
+    H[:3, :3] = R
+    H[:3, 3] = T
+    H_world2bbox = torch.inverse(H)
+    origins = torch.cat((origins, torch.ones_like(origins[..., :1])), dim=-1)
+    origins = torch.matmul(H_world2bbox, origins.T).T[..., :3]
+    directions = torch.matmul(H_world2bbox[:3, :3], directions.T).T
+
+    # Compute intersection with axis-aligned bounding box with min as -S and max as +S
+    aabb = torch.concat((-S / 2, S / 2))
+    t_min, t_max = intersect_aabb(origins, directions, aabb, max_bound=max_bound, invalid_value=invalid_value)
 
     return t_min, t_max
 
@@ -286,7 +257,9 @@ def masked_reduction(
 
 
 def normalized_depth_scale_and_shift(
-    prediction: Float[Tensor, "1 32 mult"], target: Float[Tensor, "1 32 mult"], mask: Bool[Tensor, "1 32 mult"]
+    prediction: Float[Tensor, "1 32 mult"],
+    target: Float[Tensor, "1 32 mult"],
+    mask: Bool[Tensor, "1 32 mult"],
 ):
     """
     More info here: https://arxiv.org/pdf/2206.00665.pdf supplementary section A2 Depth Consistency Loss
@@ -324,4 +297,218 @@ def normalized_depth_scale_and_shift(
     shift[valid] = (-a_01[valid] * b_0[valid] + a_00[valid] * b_1[valid]) / det[valid]
 
     return scale, shift
-    return scale, shift
+
+
+def columnwise_squared_l2_distance(
+    x: Float[Tensor, "*M N"],
+    y: Float[Tensor, "*M N"],
+) -> Float[Tensor, "N N"]:
+    """Compute the squared Euclidean distance between all pairs of columns.
+    Adapted from https://github.com/google-research/multinerf/blob/5b4d4f64608ec8077222c52fdf814d40acc10bc1/internal/geopoly.py
+
+    Args:
+        x: tensor of floats, with shape [M, N].
+        y: tensor of floats, with shape [M, N].
+    Returns:
+        sq_dist: tensor of floats, with shape [N, N].
+    """
+    # Use the fact that ||x - y||^2 == ||x||^2 + ||y||^2 - 2 x^T y.
+    sq_norm_x = torch.sum(x**2, 0)
+    sq_norm_y = torch.sum(y**2, 0)
+    sq_dist = sq_norm_x[:, None] + sq_norm_y[None, :] - 2 * x.T @ y
+    return sq_dist
+
+
+def _compute_tesselation_weights(v: int) -> Tensor:
+    """Tesselate the vertices of a triangle by a factor of `v`.
+    Adapted from https://github.com/google-research/multinerf/blob/5b4d4f64608ec8077222c52fdf814d40acc10bc1/internal/geopoly.py
+
+    Args:
+        v: int, the factor of the tesselation (v==1 is a no-op to the triangle).
+
+    Returns:
+        weights: tesselated weights.
+    """
+    if v < 1:
+        raise ValueError(f"v {v} must be >= 1")
+    int_weights = []
+    for i in range(v + 1):
+        for j in range(v + 1 - i):
+            int_weights.append((i, j, v - (i + j)))
+    int_weights = torch.FloatTensor(int_weights)
+    weights = int_weights / v  # Barycentric weights.
+    return weights
+
+
+def _tesselate_geodesic(
+    vertices: Float[Tensor, "N 3"],
+    faces: Float[Tensor, "M 3"],
+    v: int,
+    eps: float = 1e-4,
+) -> Tensor:
+    """Tesselate the vertices of a geodesic polyhedron.
+
+    Adapted from https://github.com/google-research/multinerf/blob/5b4d4f64608ec8077222c52fdf814d40acc10bc1/internal/geopoly.py
+
+    Args:
+        vertices: tensor of floats, the vertex coordinates of the geodesic.
+        faces: tensor of ints, the indices of the vertices of base_verts that
+            constitute eachface of the polyhedra.
+        v: int, the factor of the tesselation (v==1 is a no-op).
+        eps: float, a small value used to determine if two vertices are the same.
+
+    Returns:
+        verts: a tensor of floats, the coordinates of the tesselated vertices.
+    """
+    tri_weights = _compute_tesselation_weights(v)
+
+    verts = []
+    for face in faces:
+        new_verts = torch.matmul(tri_weights, vertices[face, :])
+        new_verts /= torch.sqrt(torch.sum(new_verts**2, 1, keepdim=True))
+        verts.append(new_verts)
+    verts = torch.concatenate(verts, 0)
+
+    sq_dist = columnwise_squared_l2_distance(verts.T, verts.T)
+    assignment = torch.tensor([torch.min(torch.argwhere(d <= eps)) for d in sq_dist])
+    unique = torch.unique(assignment)
+    verts = verts[unique, :]
+    return verts
+
+
+def generate_polyhedron_basis(
+    basis_shape: Literal["icosahedron", "octahedron"],
+    angular_tesselation: int,
+    remove_symmetries: bool = True,
+    eps: float = 1e-4,
+) -> Tensor:
+    """Generates a 3D basis by tesselating a geometric polyhedron.
+    Basis is used to construct Fourier features for positional encoding.
+    See Mip-Nerf360 paper: https://arxiv.org/abs/2111.12077
+    Adapted from https://github.com/google-research/multinerf/blob/5b4d4f64608ec8077222c52fdf814d40acc10bc1/internal/geopoly.py
+
+    Args:
+        base_shape: string, the name of the starting polyhedron, must be either
+            'icosahedron' or 'octahedron'.
+        angular_tesselation: int, the number of times to tesselate the polyhedron,
+            must be >= 1 (a value of 1 is a no-op to the polyhedron).
+        remove_symmetries: bool, if True then remove the symmetric basis columns,
+            which is usually a good idea because otherwise projections onto the basis
+            will have redundant negative copies of each other.
+        eps: float, a small number used to determine symmetries.
+
+    Returns:
+        basis: a matrix with shape [3, n].
+    """
+    if basis_shape == "icosahedron":
+        a = (math.sqrt(5) + 1) / 2
+        verts = torch.FloatTensor(
+            [
+                (-1, 0, a),
+                (1, 0, a),
+                (-1, 0, -a),
+                (1, 0, -a),
+                (0, a, 1),
+                (0, a, -1),
+                (0, -a, 1),
+                (0, -a, -1),
+                (a, 1, 0),
+                (-a, 1, 0),
+                (a, -1, 0),
+                (-a, -1, 0),
+            ]
+        ) / math.sqrt(a + 2)
+        faces = torch.tensor(
+            [
+                (0, 4, 1),
+                (0, 9, 4),
+                (9, 5, 4),
+                (4, 5, 8),
+                (4, 8, 1),
+                (8, 10, 1),
+                (8, 3, 10),
+                (5, 3, 8),
+                (5, 2, 3),
+                (2, 7, 3),
+                (7, 10, 3),
+                (7, 6, 10),
+                (7, 11, 6),
+                (11, 0, 6),
+                (0, 1, 6),
+                (6, 1, 10),
+                (9, 0, 11),
+                (9, 11, 2),
+                (9, 2, 5),
+                (7, 2, 11),
+            ]
+        )
+        verts = _tesselate_geodesic(verts, faces, angular_tesselation)
+    elif basis_shape == "octahedron":
+        verts = torch.FloatTensor([(0, 0, -1), (0, 0, 1), (0, -1, 0), (0, 1, 0), (-1, 0, 0), (1, 0, 0)])
+        corners = torch.FloatTensor(list(itertools.product([-1, 1], repeat=3)))
+        pairs = torch.argwhere(columnwise_squared_l2_distance(corners.T, verts.T) == 2)
+        faces, _ = torch.sort(torch.reshape(pairs[:, 1], [3, -1]).T, 1)
+        verts = _tesselate_geodesic(verts, faces, angular_tesselation)
+
+    if remove_symmetries:
+        # Remove elements of `verts` that are reflections of each other.
+        match = columnwise_squared_l2_distance(verts.T, -verts.T) < eps
+        verts = verts[torch.any(torch.triu(match), 1), :]
+
+    basis = verts.flip(-1)
+    return basis
+
+
+def random_quat_tensor(N: int) -> Float[Tensor, "*batch 4"]:
+    """
+    Defines a random quaternion tensor.
+
+    Args:
+        N: Number of quaternions to generate
+
+    Returns:
+        a random quaternion tensor of shape (N, 4)
+
+    """
+    u = torch.rand(N)
+    v = torch.rand(N)
+    w = torch.rand(N)
+    return torch.stack(
+        [
+            torch.sqrt(1 - u) * torch.sin(2 * math.pi * v),
+            torch.sqrt(1 - u) * torch.cos(2 * math.pi * v),
+            torch.sqrt(u) * torch.sin(2 * math.pi * w),
+            torch.sqrt(u) * torch.cos(2 * math.pi * w),
+        ],
+        dim=-1,
+    )
+
+
+def k_nearest_sklearn(
+    x: torch.Tensor, k: int, metric: str = "euclidean"
+) -> Tuple[Float[Tensor, "*batch k"], Int[Tensor, "*batch k"]]:
+    """
+    Find k-nearest neighbors using sklearn's NearestNeighbors.
+
+    Args:
+        x: input tensor
+        k: number of neighbors to find
+        metric: metric to use for distance computation
+
+    Returns:
+        distances: distances to the k-nearest neighbors
+        indices: indices of the k-nearest neighbors
+    """
+    # Convert tensor to numpy array
+    x_np = x.cpu().numpy()
+
+    # Build the nearest neighbors model
+    from sklearn.neighbors import NearestNeighbors
+
+    nn_model = NearestNeighbors(n_neighbors=k + 1, algorithm="auto", metric=metric).fit(x_np)
+
+    # Find the k-nearest neighbors
+    distances, indices = nn_model.kneighbors(x_np)
+
+    # Exclude the point itself from the result and return
+    return torch.tensor(distances[:, 1:], dtype=torch.float32), torch.tensor(indices[:, 1:], dtype=torch.int64)

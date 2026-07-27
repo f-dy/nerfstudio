@@ -24,7 +24,7 @@ import nerfstudio.utils.poses as pose_utils
 from nerfstudio.cameras import camera_utils
 from nerfstudio.cameras.camera_utils import get_interpolated_poses_many
 from nerfstudio.cameras.cameras import Cameras, CameraType
-from nerfstudio.viewer.server.utils import three_js_perspective_camera_focal_length
+from nerfstudio.viewer_legacy.server.utils import three_js_perspective_camera_focal_length
 
 
 def get_interpolated_camera_path(cameras: Cameras, steps: int, order_poses: bool, fixed_intrinsics: bool) -> Cameras:
@@ -40,11 +40,19 @@ def get_interpolated_camera_path(cameras: Cameras, steps: int, order_poses: bool
     """
     Ks = cameras.get_intrinsics_matrices()
     poses = cameras.camera_to_worlds
+    times = cameras.times
     widths = cameras.width
     heights = cameras.height
     dist_coeffs = cameras.distortion_params
-    poses, Ks, widths, heights, dist_coeffs = get_interpolated_poses_many(
-        poses, Ks, widths, heights, dist_coeffs, steps_per_transition=steps, order_poses=order_poses
+    poses, Ks, times, widths, heights, dist_coeffs = get_interpolated_poses_many(
+        poses,
+        Ks,
+        times=times,
+        widths=widths,
+        heights=heights,
+        dist_coeffs=dist_coeffs,
+        steps_per_transition=steps,
+        order_poses=order_poses,
     )
 
     if fixed_intrinsics:
@@ -58,6 +66,7 @@ def get_interpolated_camera_path(cameras: Cameras, steps: int, order_poses: bool
             distortion_params=dist_coeffs[0] if dist_coeffs is not None else None,
             camera_type=cameras.camera_type[0],
             camera_to_worlds=poses,
+            times=times,
         )
     else:
         cameras = Cameras(
@@ -70,6 +79,7 @@ def get_interpolated_camera_path(cameras: Cameras, steps: int, order_poses: bool
             distortion_params=dist_coeffs,
             camera_type=cameras.camera_type[0],
             camera_to_worlds=poses,
+            times=times,
         )
     return cameras
 
@@ -163,6 +173,8 @@ def get_path_from_json(camera_path: Dict[str, Any]) -> Cameras:
         camera_type = CameraType.EQUIRECTANGULAR
     elif camera_path["camera_type"].lower() == "omnidirectional":
         camera_type = CameraType.OMNIDIRECTIONALSTEREO_L
+    elif camera_path["camera_type"].lower() == "vr180":
+        camera_type = CameraType.VR180_L
     else:
         camera_type = CameraType.PERSPECTIVE
 
@@ -173,11 +185,13 @@ def get_path_from_json(camera_path: Dict[str, Any]) -> Cameras:
         # pose
         c2w = torch.tensor(camera["camera_to_world"]).view(4, 4)[:3]
         c2ws.append(c2w)
-        if (
-            camera_type == CameraType.EQUIRECTANGULAR
-            or camera_type == CameraType.OMNIDIRECTIONALSTEREO_L
-            or camera_type == CameraType.OMNIDIRECTIONALSTEREO_R
-        ):
+        if camera_type in [
+            CameraType.EQUIRECTANGULAR,
+            CameraType.OMNIDIRECTIONALSTEREO_L,
+            CameraType.OMNIDIRECTIONALSTEREO_R,
+            CameraType.VR180_L,
+            CameraType.VR180_R,
+        ]:
             fxs.append(image_width / 2)
             fys.append(image_height)
         else:

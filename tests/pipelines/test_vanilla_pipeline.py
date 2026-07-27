@@ -1,20 +1,16 @@
 """
 Test pipeline
 """
+
 from pathlib import Path
 
 import torch
 from torch import nn
 
 from nerfstudio.cameras.cameras import Cameras
+from nerfstudio.data.datamanagers.base_datamanager import VanillaDataManagerConfig
 from nerfstudio.data.datasets.base_dataset import DataparserOutputs, InputDataset
-from nerfstudio.pipelines.base_pipeline import (
-    Model,
-    ModelConfig,
-    VanillaDataManagerConfig,
-    VanillaPipeline,
-    VanillaPipelineConfig,
-)
+from nerfstudio.pipelines.base_pipeline import Model, ModelConfig, VanillaPipeline, VanillaPipelineConfig
 
 
 class MockedDataManager:
@@ -46,7 +42,7 @@ def test_load_state_dict():
     """Test pipeline load_state_dict calls model's load_state_dict"""
     was_called = False
 
-    class MockedModel(Model):  #
+    class MockedModel(Model):
         """Mocked model"""
 
         def __init__(self, *args, **kwargs):

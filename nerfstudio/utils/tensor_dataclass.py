@@ -71,9 +71,9 @@ class TensorDataclass:
         set _shape to be the broadcasted shape.
         """
         for k, v in self._field_custom_dimensions.items():
-            assert (
-                isinstance(v, int) and v > 1
-            ), f"Custom dimensions must be an integer greater than 1, since 1 is the default, received {k}: {v}"
+            assert isinstance(v, int) and v > 1, (
+                f"Custom dimensions must be an integer greater than 1, since 1 is the default, received {k}: {v}"
+            )
 
         # Shim to prevent pyright from narrowing `self` to DataclassInstance.
         self_dc = self
@@ -141,6 +141,9 @@ class TensorDataclass:
                 new_dict[k] = v.broadcast_to(batch_shape)
             elif isinstance(v, Dict):
                 new_dict[k] = self._broadcast_dict_fields(v, batch_shape)
+            else:
+                # Don't broadcast the remaining fields
+                new_dict[k] = v
         return new_dict
 
     def __getitem__(self: TensorDataclassT, indices) -> TensorDataclassT:
@@ -261,6 +264,14 @@ class TensorDataclass:
         """
         return self._apply_fn_to_fields(lambda x: x.to(device))
 
+    def pin_memory(self: TensorDataclassT) -> TensorDataclassT:
+        """Pins the tensor dataclass memory
+
+        Returns:
+            TensorDataclass: A new TensorDataclass with the same data but pinned.
+        """
+        return self._apply_fn_to_fields(lambda x: x.pin_memory())
+
     def _apply_fn_to_fields(
         self: TensorDataclassT,
         fn: Callable,
@@ -269,7 +280,7 @@ class TensorDataclass:
     ) -> TensorDataclassT:
         """Applies a function to all fields of the tensor dataclass.
 
-        TODO: Someone needs to make a high level design choice for whether not not we want this
+        TODO: Someone needs to make a high level design choice for whether or not we want this
         to apply the function to any fields in arbitray superclasses. This is an edge case until we
         upgrade to python 3.10 and dataclasses can actually be subclassed with vanilla python and no
         janking, but if people try to jank some subclasses that are grandchildren of TensorDataclass

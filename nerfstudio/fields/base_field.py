@@ -85,9 +85,9 @@ class Field(nn.Module):
         """
         assert self._sample_locations is not None, "Sample locations must be set before calling get_normals."
         assert self._density_before_activation is not None, "Density must be set before calling get_normals."
-        assert (
-            self._sample_locations.shape[:-1] == self._density_before_activation.shape[:-1]
-        ), "Sample locations and density must have the same shape besides the last dimension."
+        assert self._sample_locations.shape[:-1] == self._density_before_activation.shape[:-1], (
+            "Sample locations and density must have the same shape besides the last dimension."
+        )
 
         normals = torch.autograd.grad(
             self._density_before_activation,
@@ -133,8 +133,8 @@ class Field(nn.Module):
         return field_outputs
 
 
-def shift_directions_for_tcnn(directions: Float[Tensor, "*bs 3"]) -> Float[Tensor, "*bs 3"]:
-    """Shift directions from [-1, 1] to [0, 1]
+def get_normalized_directions(directions: Float[Tensor, "*bs 3"]) -> Float[Tensor, "*bs 3"]:
+    """SH encoding must be in the range [0, 1]
 
     Args:
         directions: batch of directions

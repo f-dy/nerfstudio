@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Data parser for NuScenes dataset"""
+
 import math
 import os
 from dataclasses import dataclass, field
@@ -22,14 +23,9 @@ from typing import Literal, Optional, Tuple, Type
 import numpy as np
 import pyquaternion
 import torch
-from nuscenes.nuscenes import NuScenes as NuScenesDatabase
 
 from nerfstudio.cameras.cameras import Cameras, CameraType
-from nerfstudio.data.dataparsers.base_dataparser import (
-    DataParser,
-    DataParserConfig,
-    DataparserOutputs,
-)
+from nerfstudio.data.dataparsers.base_dataparser import DataParser, DataParserConfig, DataparserOutputs
 from nerfstudio.data.scene_box import SceneBox
 
 
@@ -85,6 +81,9 @@ class NuScenes(DataParser):
     config: NuScenesDataParserConfig
 
     def _generate_dataparser_outputs(self, split="train"):
+        # nuscenes is slow to import, so we only do it if we need it.
+        from nuscenes.nuscenes import NuScenes as NuScenesDatabase
+
         nusc = NuScenesDatabase(
             version=self.config.version,
             dataroot=str(self.config.data_dir.absolute()),
@@ -92,9 +91,9 @@ class NuScenes(DataParser):
         )
         cameras = ["CAM_" + camera for camera in self.config.cameras]
 
-        assert (
-            len(cameras) == 1
-        ), "waiting on multiple camera support"  # TODO: remove once multiple cameras are supported
+        assert len(cameras) == 1, (
+            "waiting on multiple camera support"
+        )  # TODO: remove once multiple cameras are supported
 
         # get samples for scene
         samples = [
@@ -200,10 +199,10 @@ class NuScenes(DataParser):
         )
 
         cameras = Cameras(
-            fx=intrinsics[:, 0, 0],
-            fy=intrinsics[:, 1, 1],
-            cx=intrinsics[:, 0, 2],
-            cy=intrinsics[:, 1, 2],
+            fx=intrinsics[:, 0, 0].detach().clone(),
+            fy=intrinsics[:, 1, 1].detach().clone(),
+            cx=intrinsics[:, 0, 2].detach().clone(),
+            cy=intrinsics[:, 1, 2].detach().clone(),
             height=900,
             width=1600,
             camera_to_worlds=poses[:, :3, :4],

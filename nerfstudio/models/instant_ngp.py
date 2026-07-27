@@ -19,31 +19,20 @@ Implementation of Instant NGP.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Optional, Tuple, Type
+from typing import Dict, List, Literal, Optional, Tuple, Type, Union, cast
 
 import nerfacc
 import torch
 from torch.nn import Parameter
-from torchmetrics import PeakSignalNoiseRatio
-from torchmetrics.functional import structural_similarity_index_measure
-from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from nerfstudio.cameras.rays import RayBundle
-from nerfstudio.engine.callbacks import (
-    TrainingCallback,
-    TrainingCallbackAttributes,
-    TrainingCallbackLocation,
-)
+from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes, TrainingCallbackLocation
 from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.field_components.spatial_distortions import SceneContraction
 from nerfstudio.fields.nerfacto_field import NerfactoField
-from nerfstudio.model_components.losses import MSELoss
+from nerfstudio.model_components.losses import MSELoss, scale_gradients_by_distance_squared
 from nerfstudio.model_components.ray_samplers import VolumetricSampler
-from nerfstudio.model_components.renderers import (
-    AccumulationRenderer,
-    DepthRenderer,
-    RGBRenderer,
-)
+from nerfstudio.model_components.renderers import AccumulationRenderer, DepthRenderer, RGBRenderer
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import colormaps
 
@@ -60,7 +49,7 @@ class InstantNGPModelConfig(ModelConfig):
     """Whether to create a scene collider to filter rays."""
     collider_params: Optional[Dict[str, float]] = None
     """Instant NGP doesn't use a collider."""
-    grid_resolution: int = 128
+    grid_resolution: Union[int, List[int]] = 128
     """Resolution of the grid used for the field."""
     grid_levels: int = 4
     """Levels of the grid used for the field."""
@@ -78,10 +67,15 @@ class InstantNGPModelConfig(ModelConfig):
     """How far along ray to start sampling."""
     far_plane: float = 1e3
     """How far along ray to stop sampling."""
+    use_gradient_scaling: bool = False
+    """Use gradient scaler where the gradients are lower for points closer to the camera."""
     use_appearance_embedding: bool = False
     """Whether to use an appearance embedding."""
     background_color: Literal["random", "black", "white"] = "random"
-    """The color that is given to untrained areas."""
+    """
+    The color that is given to masked areas.
+    These areas are used to force the density in those regions to be zero.
+    """
     disable_scene_contraction: bool = False
     """Whether to disable scene contraction or not."""
 
@@ -110,6 +104,7 @@ class NGPModel(Model):
 
         self.field = NerfactoField(
             aabb=self.scene_box.aabb,
+            appearance_embedding_dim=0 if self.config.use_appearance_embedding else 32,
             num_images=self.num_train_data,
             log2_hashmap_size=self.config.log2_hashmap_size,
             max_res=self.config.max_res,
@@ -143,6 +138,10 @@ class NGPModel(Model):
         self.rgb_loss = MSELoss()
 
         # metrics
+        from torchmetrics.functional import structural_similarity_index_measure
+        from torchmetrics.image import PeakSignalNoiseRatio
+        from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
         self.ssim = structural_similarity_index_measure
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True)
@@ -153,7 +152,7 @@ class NGPModel(Model):
         def update_occupancy_grid(step: int):
             self.occupancy_grid.update_every_n_steps(
                 step=step,
-                occ_eval_fn=lambda x: self.field.density_fn(x) * self.config.render_step_size,
+                occ_eval_fn=lambda x: self.field.density_fn(x) * cast(float, self.config.render_step_size),
             )
 
         return [
@@ -171,7 +170,7 @@ class NGPModel(Model):
         param_groups["fields"] = list(self.field.parameters())
         return param_groups
 
-    def get_outputs(self, ray_bundle: RayBundle):
+    def get_outputs(self, ray_bundle: RayBundle):  # type: ignore
         assert self.field is not None
         num_rays = len(ray_bundle)
 
@@ -186,6 +185,8 @@ class NGPModel(Model):
             )
 
         field_outputs = self.field(ray_samples)
+        if self.config.use_gradient_scaling:
+            field_outputs = scale_gradients_by_distance_squared(field_outputs, ray_samples)
 
         # accumulation
         packed_info = nerfacc.pack_info(ray_indices, num_rays)
@@ -218,6 +219,7 @@ class NGPModel(Model):
 
     def get_metrics_dict(self, outputs, batch):
         image = batch["image"].to(self.device)
+        image = self.renderer_rgb.blend_background(image)
         metrics_dict = {}
         metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
         metrics_dict["num_samples_per_batch"] = outputs["num_samples_per_ray"].sum()
@@ -225,7 +227,12 @@ class NGPModel(Model):
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
         image = batch["image"].to(self.device)
-        rgb_loss = self.rgb_loss(image, outputs["rgb"])
+        pred_rgb, image = self.renderer_rgb.blend_background_for_loss_computation(
+            pred_image=outputs["rgb"],
+            pred_accumulation=outputs["accumulation"],
+            gt_image=image,
+        )
+        rgb_loss = self.rgb_loss(image, pred_rgb)
         loss_dict = {"rgb_loss": rgb_loss}
         return loss_dict
 
@@ -233,6 +240,7 @@ class NGPModel(Model):
         self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
     ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
         image = batch["image"].to(self.device)
+        image = self.renderer_rgb.blend_background(image)
         rgb = outputs["rgb"]
         acc = colormaps.apply_colormap(outputs["accumulation"])
         depth = colormaps.apply_depth_colormap(
